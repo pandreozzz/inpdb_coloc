@@ -10,3 +10,5 @@ install dependencies
 ```
 % pip install -r requirements.txt
 ```
+
+Create your own development branch and make pull requests to main
