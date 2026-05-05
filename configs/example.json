@@ -1,0 +1,8 @@
+{
+    "comment_inpdb_csvfile" : "specify the csv file to use under the inp_data directory",
+    "inpdb_csvfile" : "20501230_The_Very_Most_UpToDate_INPDB.csv",
+    "comment_lonlat_approx" : "Round site locations to a quarter of degree",
+    "lonlat_approx" : 0.25,
+    "comment_t_approx_h" : "Approximate observation times to the hour",
+    "t_approx_h" : true
+}
