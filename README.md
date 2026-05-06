@@ -1,5 +1,8 @@
 ## Develop stuff
-**IMPORTANT: Create your own development branch and make pull requests to main**
+**IMPORTANT: Create your own code development branch and make pull requests to main**
+
+## Notes
+In the folder `./notes` we could put shared info like meeting summaries, tasks etc. Pushing to main is probably OK here
 
 ## Usage example
 Check out the jupyter notebook introduction.ipynb
