@@ -1,5 +1,6 @@
 # temporary files
 .DS_Store
 .ipynb_checkpoints
+.local_venv
 *.pyc
 __pycache__/
