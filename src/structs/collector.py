@@ -3,11 +3,14 @@ from __future__ import annotations
 from typing import Union, Optional, List, Tuple
 import pandas as pd
 import numpy as np
+from src.physics.aerotools import get_nccn_over_mcon_from_specs
 import xarray as xr
 
 from .sparser import INPIndex
 from .cores import DenseValue
 from .model import CamsClimHandler, CamsOutputHandler
+from src.physics.inp import INPParametrization
+from src.physics.aerosol import AerosolSpec
     
 class INPCollection:
     """Designed to contain sparse data.
@@ -271,6 +274,70 @@ class INPCollection:
             time_extractor = time
         return self.cams_free.get_data(time=time_extractor, loc=loc, var_subset=var_subset)
 
+    def get_cams_clim_inp(self, 
+                          inp_params: dict[str, INPParametrization], 
+                          aerosol_spec: AerosolSpec,
+                          time : Union[None, np.datetime64,
+                                   List[np.datetime64],
+                                   np.ndarray,
+                                   xr.DataArray] = None,
+                          loc : Union[None, int, List[int], xr.DataArray] = None,
+                          ) -> dict[str, Union[pd.Series, xr.DataArray]]:
+        """Get CAMS climatology at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
+        Returns a dictionary with the INP concentrations per parametrization and the total INP concentration."""
+
+        # Get cams aerosol mass mixing ratios
+        cams_data = self.get_cams_free(time, loc)
+        temperature_data = self.T()
+        air_density_data = self.rho()
+
+        inp_num_conc = {}
+        for name, param in inp_params.items():
+            inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
+            
+        # Compute total INP concentration by summing over the different parametrizations
+        total_inp_conc = sum(inp_num_conc.values())
+        inp_num_conc["total"] = total_inp_conc
+
+        # Merge dict to one dataset
+        inp_num_conc_ds = xr.Dataset(
+            data_vars = inp_num_conc
+            )
+
+        return inp_num_conc_ds
+
+    def get_cams_free_inp(self, 
+                          inp_params: dict[str, INPParametrization], 
+                          aerosol_spec: AerosolSpec,
+                          time : Union[None, np.datetime64,
+                                       List[np.datetime64],
+                                       np.ndarray,
+                                       xr.DataArray] = None,
+                          loc : Union[None, int, List[int], xr.DataArray] = None,
+                          ) -> dict[str, Union[pd.Series, xr.DataArray]]:
+        """Get CAMS free at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
+        Returns a dictionary with the INP concentrations per parametrization and the total INP concentration."""
+
+        # Get cams aerosol mass mixing ratios
+        cams_data = self.get_cams_clim(time, loc)
+        temperature_data = self.T()
+        air_density_data = self.rho()
+
+        inp_num_conc = {}
+        for name, param in inp_params.items():
+            inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
+            
+        # Compute total INP concentration by summing over the different parametrizations
+        total_inp_conc = sum(inp_num_conc.values())
+        inp_num_conc["total"] = total_inp_conc
+
+        # Merge dict to one dataset
+        inp_num_conc_ds = xr.Dataset(
+            data_vars = inp_num_conc
+            )
+
+        return inp_num_conc_ds
+
     def compact(self):
         print("Not implemented yet - should reprocess all indices and values to remove duplicates")
         pass
@@ -330,6 +397,28 @@ class INPCollection:
     def RHi(self, loc : Optional[Union[List[int], int]] = None):
         """Returns relative humidity with respect to ice per each entry. entry indexes can be specified using loc"""
         return self.sparse.getv("RHi", loc=loc)
+
+    def p(self, loc : Optional[Union[List[int], int]] = None):
+        """Returns air pressure per each entry. entry indexes can be specified using loc. For now returns pressure at height from isothermal atmosphere. This should be revised to use actual pressure data e.g. from era5 or more accurate formula."""
+        # barometric height formula for isothermal atmosphere
+        from src.physics.constants import Constants
+        p0 = 101325 # Pa
+        constants = Constants()
+        M = constants.M
+        g = constants.g
+        R = constants.R
+        h = self.alt(loc=loc)
+        T = self.T(loc=loc)
+        return p0 * np.exp(-M * g * h / (R * T))
+        
+
+    def rho(self, loc : Optional[Union[List[int], int]] = None):
+        """Returns air density per each entry. entry indexes can be specified using loc"""
+        from src.physics.constants import Constants
+        constants = Constants()
+        # Ideal gas law to get air density from pressure and temperature
+        air_density = self.p(loc=loc) / (constants.R_s * self.T(loc=loc)) 
+        return air_density
     
     def __init__(self, inpdb_path : Optional[str] = None,
                  cams_clim_path : Optional[str] = None,
