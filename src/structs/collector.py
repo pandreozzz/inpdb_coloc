@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Union, Optional, List, Tuple
 import pandas as pd
 import numpy as np
-from src.physics.aerotools import get_nccn_over_mcon_from_specs
 import xarray as xr
 
 from .sparser import INPIndex
