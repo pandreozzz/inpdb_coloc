@@ -286,10 +286,9 @@ class INPCollection:
         Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
-        cams_data = self.get_cams_free(time, loc)
-        temperature_data = self.T()
-        air_density_data = self.rho()
-
+        cams_data = self.get_cams_clim(time, loc)
+        temperature_data = self.T(loc=loc)
+        air_density_data = self.rho(loc=loc)
         inp_num_conc = {}
         for name, param in inp_params.items():
             inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
@@ -313,15 +312,14 @@ class INPCollection:
                                        np.ndarray,
                                        xr.DataArray] = None,
                           loc : Union[None, int, List[int], xr.DataArray] = None,
-                          ) -> dict[str, Union[pd.Series, xr.DataArray]]:
-        """Get CAMS free at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
-        Returns a dictionary with the INP concentrations per parametrization and the total INP concentration."""
+                          ) -> xr.Dataset:
+        """Get CAMS free-running output at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
+        Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
-        cams_data = self.get_cams_clim(time, loc)
-        temperature_data = self.T()
-        air_density_data = self.rho()
-
+        cams_data = self.get_cams_free(time, loc)
+        temperature_data = self.T(loc=loc)
+        air_density_data = self.rho(loc=loc)
         inp_num_conc = {}
         for name, param in inp_params.items():
             inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
