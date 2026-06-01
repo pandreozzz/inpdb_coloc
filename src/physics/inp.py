@@ -107,7 +107,7 @@ class INPParametrizationCatalog:
              aerosol_variables=aerospec.dustvars, 
              T_min=246, # Minimum temperature for the parametrization in Kelvin
              T_max=267, # Maximum temperature for the parametrization in Kelvin
-               doi="https://doi.org/10.5194/acp-14-1853-2014",
+             doi="https://doi.org/10.5194/acp-14-1853-2014",
              )
         self.parametrizations[name] = param
 
