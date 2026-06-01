@@ -281,9 +281,9 @@ class INPCollection:
                                    np.ndarray,
                                    xr.DataArray] = None,
                           loc : Union[None, int, List[int], xr.DataArray] = None,
-                          ) -> dict[str, Union[pd.Series, xr.DataArray]]:
+                          ) -> xr.Dataset:
         """Get CAMS climatology at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
-        Returns a dictionary with the INP concentrations per parametrization and the total INP concentration."""
+        Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
         cams_data = self.get_cams_free(time, loc)
