@@ -89,8 +89,7 @@ class INPParametrizationCatalog:
         param.initialise(
              site_density_function=ns_kf, # kfeldspar
              aerosol_variables=aerospec.dustvars, 
-             aerosol_fraction=0.05, # Assume 5% of dust is feldspar, which is the active INP species parametrised in Harrison et al. 2019
-             T_min=248, # Minimum temperature for the parametrization in Kelvin
+             aerosol_fraction=0.05, # Assume 5% of dust is feldspar (k-feldspar fraction); see Atkinson et al. 2013 for context
              T_max=268, # Maximum temperature for the parametrization in Kelvin
              doi="https://doi.org/10.1038/nature12278",
              )
