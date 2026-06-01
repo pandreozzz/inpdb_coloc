@@ -281,14 +281,19 @@ class INPCollection:
                                    np.ndarray,
                                    xr.DataArray] = None,
                           loc : Union[None, int, List[int], xr.DataArray] = None,
+                          T_source: str = "inpdb" # or "era5" to be implemented,
                           ) -> xr.Dataset:
         """Get CAMS climatology at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
         Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
         cams_data = self.get_cams_clim(time, loc)
-        temperature_data = self.T(loc=loc)
-        air_density_data = self.rho(loc=loc)
+        if T_source == "inpdb":
+            temperature_data = self.T()
+        elif T_source == "era5":
+            # Implement ERA5 temperature extraction here. This would allow using locations and times not co-located with the INP observations
+            pass
+        air_density_data = self.rho() # should use model pressure and temperature in the future
         inp_num_conc = {}
         for name, param in inp_params.items():
             inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
@@ -312,14 +317,19 @@ class INPCollection:
                                        np.ndarray,
                                        xr.DataArray] = None,
                           loc : Union[None, int, List[int], xr.DataArray] = None,
+                          T_source: str = "inpdb" # or "era5" to be implemented,
                           ) -> xr.Dataset:
         """Get CAMS free-running output at the INP coordinates and times, and apply the parametrizations to get INP concentrations.
         Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
         cams_data = self.get_cams_free(time, loc)
-        temperature_data = self.T(loc=loc)
-        air_density_data = self.rho(loc=loc)
+        if T_source == "inpdb":
+            temperature_data = self.T()
+        elif T_source == "era5":
+            # Implement ERA5 temperature extraction here. This would allow using locations and times not co-located with the INP observations
+            pass
+        air_density_data = self.rho() # should use model pressure and temperature in the future
         inp_num_conc = {}
         for name, param in inp_params.items():
             inp_num_conc[name] = param.compute_inp_concentration(temperature_data, air_density_data, cams_data, aerosol_spec)
