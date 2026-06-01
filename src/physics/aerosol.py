@@ -5,8 +5,6 @@ import xarray as xr
 
 from .aerotools import IFSAeroSpecs, get_nccn_over_mcon_from_specs, get_mean_diam_from_spec
 
-from .aerotools import IFSAeroSpecs, get_nccn_over_mcon_from_specs, get_mean_diam_from_spec
-
 
 class AerosolSpec:
     """Class to handle aerosol specifications."""
