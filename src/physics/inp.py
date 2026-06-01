@@ -41,8 +41,8 @@ class INPParametrization:
 
 class INPParametrizationCatalog:
     """Class to store a catalog of INP parametrizations."""
-    def __init__(self, parametrizations: dict[str, INPParametrization]={}):
-        self.parametrizations = parametrizations
+    def __init__(self, parametrizations: Optional[dict[str, INPParametrization]] = None):
+        self.parametrizations = {} if parametrizations is None else parametrizations
         self.load_parametrizations()
 
     def load_parametrizations(self):
