@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
-from typing import Dict, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Union
 
 import numpy as np
-import xarray as xr
-
 from scipy.integrate import quad
 from scipy.special import erf
 
