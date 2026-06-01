@@ -9,5 +9,5 @@
 ## ToDo / Open tasks
 - Derive pressure at given altitude. (e.g. from era5 fields)
     - Needed for density calculation, used for computing concentrations from mixing ratios
-    - (And deeded for co-location)
+    - (And needed for co-location)
 - Maybe we want get_cams_clim_inp and get_cams_free_inp to return a dataset with multiple variables instead of a dictionary of datasets
