@@ -28,3 +28,24 @@ def gen_griddes_unstructured(lons : List[float],
     griddes_lines.append("xvals = " + xvals)
     griddes_lines.append("yvals = " + yvals)
     return "\n".join(griddes_lines)
+
+
+def cdo_interpolate_2d(griddes_file: str, input_nc: str, output_nc: str):
+    """
+    Interpolate a 2D NetCDF file to a new grid using CDO.
+
+    Parameters:
+    - griddes_file: Path to the grid description file.
+    - input_nc: Path to the input NetCDF file.
+    - output_nc: Path where the interpolated NetCDF file will be saved.
+    """
+    import subprocess
+    import shutil
+
+    # Check that cdo is available
+    if shutil.which("cdo") is None:
+        raise RuntimeError("CDO command not found. CDO must be installed and available in PATH.")
+
+    cmd_cdo_regrid = ["cdo", f"-remapbil,{griddes_file}", input_nc, output_nc]
+    print(f"Running CDO command: {' '.join(cmd_cdo_regrid)}")
+    subprocess.run(cmd_cdo_regrid, check=True)
