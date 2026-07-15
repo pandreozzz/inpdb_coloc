@@ -2,6 +2,7 @@
 from typing import Union
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from src.structs.collector import ObsCollection, StationsCollection
@@ -186,8 +187,10 @@ def gen_cams_pointinterp(obs_coll : Union[ObsCollection, StationsCollection],
             continue
 
         cams_clim_restricted_fpath = cams_clim_fpath.replace(".nc", f"_restricted{i}.nc")
-        # Save to workdir subdirectory
-        cams_clim_restricted_fpath = os.path.join(os.path.dirname(cams_clim_fpath), "workdir", os.path.basename(cams_clim_restricted_fpath))
+        # Save to temporary workdir subdirectory
+        import tempfile
+        workdir = tempfile.TemporaryDirectory(prefix="workdir", dir=os.path.dirname(cams_clim_fpath))
+        cams_clim_restricted_fpath = os.path.join(workdir.name, os.path.basename(cams_clim_restricted_fpath))
         cams_clim_restricted_points_fpath = cams_clim_restricted_fpath.replace(".nc", "_points.nc")
         this_ds_group = ds_orig[var_group]
         has_epoch = "epoch" in this_ds_group.dims
@@ -207,7 +210,9 @@ def gen_cams_pointinterp(obs_coll : Union[ObsCollection, StationsCollection],
 
         with xr.open_dataset(cams_clim_restricted_points_fpath, decode_times=False) as ds_sites:
             if has_epoch and "time" in ds_sites.dims:
-                ds_sites = ds_sites.assign_coords(time=this_ds_group.indexes["time"]).unstack("time")
+                mindex = pd.MultiIndex.from_tuples(this_ds_group.indexes["time"], names=["epoch", "month"])
+                mindex_coords = xr.Coordinates.from_pandas_multiindex(mindex, "time")
+                ds_sites = ds_sites.assign_coords(mindex_coords).unstack("time")
             elif "time" in ds_sites.dims:
                 ds_sites = ds_sites.rename({"time": "month"})
                 ds_sites = ds_sites.assign_coords(month=ds_orig["month"])

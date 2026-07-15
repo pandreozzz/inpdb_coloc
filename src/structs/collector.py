@@ -19,7 +19,7 @@ from ..physics.inp import INPParametrization
 from ..physics.aerosol import AerosolSpec
 
 from ..config import get_cams_clim_path, get_cams_clim_sites_path, get_cams_clim_aeronet_path,  \
-    get_cams_free_sites_path, get_cams_free_aeronet_path, get_era5_aeronet_path
+    get_cams_free_sites_path, get_cams_free_aeronet_path, get_era5_aeronet_path, get_era5_inpdb_path
 
 
 class ObsCollection:
@@ -28,11 +28,15 @@ class ObsCollection:
     temperature and rel humidities are considered as sparse values (often the same due to instrumentation)
     INP_conc is non-indexed and a single value is stored per each entry
     """
-    dense_values = []
+    obs_index_dim: str = "obs_id"  # xarray dimension name for the per-observation axis
+    _own_dense_values: List[str] = [obs_index_dim]
+    _own_dense_dtypes: Dict = {obs_index_dim: np.int64}
+    dense_values: List[str] = [obs_index_dim]       # accumulated by __init_subclass__ for subclasses
+    dense_dtypes: Dict = {obs_index_dim: np.int64}  # accumulated by __init_subclass__ for subclasses
     extra_sparse_values = []
     gettable_sparse_vars = ["time", "lon", "lat", "alt"] # geolocation
 
-
+    coord_atol : float = 1.e-4  # tolerance for matching unique (lon, lat) to model grid points
 
     griddes_file : str = ""
     cams_clim_file : str = get_cams_clim_path()
@@ -62,13 +66,24 @@ class ObsCollection:
         for v in set(sparse_vars_all):
             cls.add_sparse_getter(v)
 
+        # Accumulate dense_values and dense_dtypes from MRO so each class only
+        # declares its own additions via _own_dense_values / _own_dense_dtypes.
+        all_dense: List[str] = []
+        all_dtypes: Dict = {}
+        for c in reversed(cls.__mro__):
+            all_dense.extend(c.__dict__.get("_own_dense_values", []))
+            all_dtypes.update(c.__dict__.get("_own_dense_dtypes", {}))
+        cls.dense_values = list(dict.fromkeys(all_dense))
+        cls.dense_dtypes = dict(all_dtypes)
+
     def initialise(self, non_index_attrs : List[str] = [], extra_sparse_values : List[str] = []):
 
         # These two must be consistent
         self.non_index_attrs = non_index_attrs
         for non_index_attr in self.non_index_attrs:
             if not hasattr(self, non_index_attr):
-                setattr(self, non_index_attr, DenseValue())
+                dtype = self.dense_dtypes.get(non_index_attr, np.float64)
+                setattr(self, non_index_attr, DenseValue(dtype=dtype))
 
         # Model data
         self.cams_clim = CamsClimHandler(vert_dim="lev")
@@ -79,13 +94,49 @@ class ObsCollection:
         self.rejected_entries : Optional[pd.DataFrame] = None
 
         self.coord_attrs = ['time', 'lon', 'lat', 'alt']
-        self.value_attrs = self.extra_sparse_values+self.non_index_attrs #, 'instrument', 'instrument_type']
+        self.value_attrs = list(set(extra_sparse_values+self.extra_sparse_values+self.non_index_attrs)) #, 'instrument', 'instrument_type']
         self.all_iterable_attrs = self.coord_attrs + self.value_attrs #+\
                                         #['instrument', 'instrument_type']
 
-    def get_subset(self, entry_indexes : Optional[List[int]] = None,
-                   regenerate_coord_index : bool = True
-                   ) -> Self:
+    def _make_time_extractor(self, coord_dim: str) -> xr.DataArray:
+        """Build a DataArray used to index model data along the observation axis.
+        ``obs_id`` is the primary dimension; ``time`` is a non-dimension coordinate
+        so it never conflicts with model time axes after nearest-time selection.
+        """
+        obs_times = self.sparse.getv("time")
+        obs_dim = self.obs_index_dim
+        obs_id = getattr(self, obs_dim).values  # type: ignore[attr-defined]
+        return xr.DataArray(
+            data=obs_times,
+            dims=[obs_dim],
+            coords={
+                obs_dim: obs_id,
+                coord_dim: (obs_dim, self.sparse.coord.index)
+            }
+        )
+
+    def _make_time_extractor_explicit(self, coord_dim: str, time) -> xr.DataArray:
+        """Build a time extractor for an explicitly provided (non-None) time argument.
+        Default: returns a plain ``time``-dimension DataArray.
+        Override in subclasses to change the indexing strategy (e.g. ``obs_id × time``).
+        """
+        if isinstance(time, xr.DataArray):
+            return time
+        return xr.DataArray(data=time, dims=["time"], coords={"time": time})
+
+    def _with_obs_times(self, ds: xr.Dataset, time_is_none: bool) -> xr.Dataset:
+        """When co-locating (``time=None``), attach observation timestamps as a
+        non-dimension ``'time'`` coordinate on the ``obs_id`` axis so callers can
+        identify which observation each row corresponds to.
+        When ``time`` was explicitly provided the dataset already carries the
+        requested time axis; nothing is added.
+        """
+        if not time_is_none:
+            return ds
+        obs_dim = self.obs_index_dim
+        return ds.assign_coords({"time": (obs_dim, self.sparse.getv("time"))})
+
+    def get_subset(self, entry_indexes : Optional[List[int]] = None) -> Self:
         """Obtain subset based on entry indexes (row numbers of the original csv)"""
         subset = self.__class__()
         if not hasattr(subset, "sparse"):
@@ -96,43 +147,20 @@ class ObsCollection:
         for attr in self.non_index_attrs:
             getattr(subset, attr).copy_from(getattr(self, attr), loc=entry_indexes)
 
-        if not regenerate_coord_index:
-            for attr in ["index", "uniques"]:
-                setattr(
-                    subset.sparse.coord,
-                    attr,
-                    getattr(self.sparse.coord, attr).copy()
-                    )
-            coord_indexes = None
-
         # The fields are stored along the coord points
-        subset.cams_clim = self.cams_clim.get_subset(coord_values = subset.sparse.coord.uniques)
-        subset.cams_free = self.cams_free.get_subset(coord_values = subset.sparse.coord.uniques)
-        subset.era5 = self.era5.get_subset(coord_values = subset.sparse.coord.uniques)
+        subset.cams_clim = self.cams_clim.get_subset(coord_values=subset.sparse.coord.uniques, atol=self.coord_atol)
+        subset.cams_free = self.cams_free.get_subset(coord_values=subset.sparse.coord.uniques, atol=self.coord_atol)
+        subset.era5 = self.era5.get_subset(coord_values=subset.sparse.coord.uniques, atol=self.coord_atol)
 
         return subset
 
     def copy(self) -> Self:
         """Obtain a copy of the collection"""
-        return self.get_subset(entry_indexes=None,
-                               regenerate_coord_index=False)
-
-    def get_coord_subset(self, coord_indexes : List[int],
-                         regenerate_coord_index : bool = True
-                         ) -> None: # INPCollection:
-        """Obtain subset based on unique coordinate indexes"""
-        # Not used and might be wrong
-        pass
-        # entry_indexes = list(np.flatnonzero(np.isin(
-        #     np.asarray(self.sparse.coord.index),
-        #     np.asarray(coord_indexes))).astype(int))
-        # return self.get_subset(entry_indexes,
-        #                        regenerate_coord_index=regenerate_coord_index)
+        return self.get_subset(entry_indexes=None)
 
     def get_region_subset(self,
                           lon_west : float, lon_east : float,
-                          lat_south : float, lat_north : float,
-                          regenerate_coord_index : bool = True
+                          lat_south : float, lat_north : float
                           ) -> Self:
         """Extract subset region
         Returns the subset collection and the list of coordinate indexes
@@ -149,12 +177,10 @@ class ObsCollection:
             in_region &= (lons >= lon_west) | (lons <= lon_east)
 
         entry_indexes = np.flatnonzero(in_region).tolist()
-        return self.get_subset(entry_indexes,
-                               regenerate_coord_index=regenerate_coord_index)
+        return self.get_subset(entry_indexes)
 
     def get_timerange_subset(self,
-                             start_time : str, end_time : str,
-                             regenerate_coord_index : bool = True
+                             start_time : str, end_time : str
                              ) -> Self:
         """Extract subset from timerange
         Returns the subset collection and the list of coordinate indexes
@@ -164,26 +190,26 @@ class ObsCollection:
         in_range = (times >= start) & (times <= end)
         entry_idx_sel = np.flatnonzero(in_range).tolist()
 
-        return self.get_subset(entry_idx_sel,
-                               regenerate_coord_index=regenerate_coord_index)
+        return self.get_subset(entry_idx_sel)
 
     def load_cams_clim(self, clim_path : str):
         """Loads from file and aligns coordinates to the Obs uniques"""
         self.cams_clim.from_ncfile(clim_path)
         self.cams_clim = self.cams_clim.get_subset(
-            coord_values = self.sparse.coord.uniques
+            coord_values=self.sparse.coord.uniques, atol=self.coord_atol
         )
     def load_cams_free(self, free_path : Union[str, List[str]]):
         """Loads from file and aligns coordinates to the Obs uniques"""
         self.cams_free.from_cams_output(free_path)
+
         self.cams_free = self.cams_free.get_subset(
-            coord_values = self.sparse.coord.uniques
+            coord_values=self.sparse.coord.uniques, atol=self.coord_atol
         )
     def load_era5(self, era5_path : str):
         """Loads from file and aligns coordinates to the Obs uniques"""
         self.era5.from_era5_output(era5_path)
         self.era5 = self.era5.get_subset(
-            coord_values = self.sparse.coord.uniques
+            coord_values=self.sparse.coord.uniques, atol=self.coord_atol
         )
 
     def load_era5_geopot(self, era5_geopot_path: str):
@@ -191,49 +217,97 @@ class ObsCollection:
         era5_geopot = ERA5DataHandler(vert_dim=self.era5.vert_dim)
         era5_geopot.from_ncfile(era5_geopot_path)
         era5_geopot = era5_geopot.get_subset(
-            coord_values=self.sparse.coord.uniques
+            coord_values=self.sparse.coord.uniques, atol=self.coord_atol
         )
 
-        assert self.era5.data is not None
-        assert era5_geopot.data is not None
-        self.era5.data["z_sfc"] = era5_geopot.data["z"].squeeze(drop=True)
+        if self.era5.data is not None and era5_geopot.data is not None:
+            self.era5.data["z_sfc"] = era5_geopot.data["z"].squeeze(drop=True)
 
     def get_cams_clim(self,
                       time : Union[None, np.datetime64,
                                    List[np.datetime64],
                                    np.ndarray,
                                    xr.DataArray] = None,
-                       lev_idx : Union[None, int, List[int], xr.DataArray] = -1,
-                       loc : Union[None, int, List[int], xr.DataArray] = None,
-                       var_subset : Union[None, str, List[str]] = None
+                      vert_interp : bool = True,
+                      lev_idx : Union[None, int, List[int], xr.DataArray] = -1,
+                      loc : Union[None, int, List[int], xr.DataArray] = None,
+                      var_subset : Union[None, str, List[str]] = None
                       ) -> xr.Dataset:
-        """Get CAMS climatology interpolated to times."""
+        """Get CAMS climatology interpolated to times.
+        vert_interp: whether the data are vertically interpolated to the observation altitude
+        lev_idx: specify the vertical level (only if vert_interp is False)
+        """
+        from src.physics.vinterp import interp
 
         # Default is exact co-location (space and time) with observations
-        obs_times = self.sparse.getv("time")
         if time is None:
-            time_extractor = xr.DataArray(
-                data=obs_times,
-                dims=["time"],
-                coords={
-                    "time": obs_times,
-                    self.cams_clim.coord_dim : ("time", self.sparse.coord.index)
-                    }
-            )
+            time_extractor = self._make_time_extractor(self.cams_clim.coord_dim)
         else:
-            time_extractor = xr.DataArray(
-                data=time,
-                dims=["time"],
-                coords={"time": time}
+            time_extractor = self._make_time_extractor_explicit(self.cams_clim.coord_dim, time)
+
+
+        if vert_interp:
+            from src.physics.vinterp import interp_xarray
+            lev_dim = self.cams_clim.vert_dim
+            assert lev_dim is not None
+
+            # Step 1: pressure only (all levels, 1 variable)
+            p_cams = self.cams_clim.get_data(
+                time=time_extractor, lev_idx=None, loc=loc, var_subset=["pressure"]
+            )["pressure"]  # (lev, time), ascending pressure
+
+            p_obs = self.compute_p_obs()  # (time,)
+            tgtlevs, weights = interp_xarray(
+                p_src=p_cams,
+                p_tgt=p_obs.expand_dims({lev_dim: [0]}),
+                intp_dim_name=lev_dim,
             )
-        return self.cams_clim.get_data(time=time_extractor, lev_idx=lev_idx,
-                                       loc=loc, var_subset=var_subset)
+            tgtlevs = tgtlevs.squeeze(lev_dim)  # (time,)
+            weights = weights.squeeze(lev_dim)  # (time,)
+
+            # Step 2: load only the unique bracket levels
+            # tgtlevs from Fortran are 1-based; subtract 1 for 0-based isel.
+            n_lev = p_cams.sizes[lev_dim]
+            lower = np.clip(tgtlevs.values.astype(int) - 1, 0, n_lev - 2)
+            upper = lower + 1
+            unique_levs = np.unique(np.concatenate([lower, upper]))
+            cams_slice = self.cams_clim.get_data(
+                time=time_extractor, lev_idx=unique_levs.tolist(),
+                loc=loc, var_subset=var_subset
+            )
+
+            # Step 3: locate lower/upper within the loaded slice and interpolate
+            # tgtlevs may be 1-D (obs_id,) for co-location or 2-D (obs_id, time)
+            # for explicit time — derive dims/coords directly from tgtlevs.
+            tgt_dims = list(tgtlevs.dims)
+            tgt_coords = {d: tgtlevs[d] for d in tgt_dims}
+            lower_pos = xr.DataArray(
+                np.searchsorted(unique_levs, lower),
+                dims=tgt_dims, coords=tgt_coords
+            )
+            upper_pos = xr.DataArray(
+                np.searchsorted(unique_levs, upper),
+                dims=tgt_dims, coords=tgt_coords
+            )
+            return self._with_obs_times(
+                (1.0 - weights) * cams_slice.isel({lev_dim: lower_pos}) +
+                 weights         * cams_slice.isel({lev_dim: upper_pos}),
+                time is None)
+
+        return self._with_obs_times(
+            self.cams_clim.get_data(
+                time=time_extractor, lev_idx=lev_idx,
+                loc=loc, var_subset=var_subset),
+            time is None)
+
+
 
     def get_cams_free(self,
                       time : Union[None, np.datetime64,
                                    List[np.datetime64],
                                    np.ndarray,
                                    xr.DataArray] = None,
+                      vert_interp : bool = True,
                       lev_idx : Union[None, int, List[int], xr.DataArray] = -1,
                       loc : Union[None, int, List[int], xr.DataArray] = None,
                       var_subset : Union[None, str, List[str]] = None
@@ -241,32 +315,87 @@ class ObsCollection:
         """Get CAMS free at requested times."""
 
         # Default is exact co-location (space and time) with observations
-        obs_times = self.sparse.getv("time")
         if time is None:
-            time_extractor = xr.DataArray(
-                data=obs_times,
-                dims=["time"],
-                coords={
-                    "time": obs_times,
-                    self.cams_free.coord_dim : ("time", self.sparse.coord.index)
-                    }
-            )
-        elif not isinstance(time, xr.DataArray):
-            time_extractor = xr.DataArray(
-                data=time,
-                dims=["time"],
-                coords={"time": time}
-            )
+            time_extractor = self._make_time_extractor(self.cams_free.coord_dim)
         else:
-            time_extractor = time
-        return self.cams_free.get_data(time=time_extractor, lev_idx=lev_idx,
-                                       loc=loc, var_subset=var_subset)
+            time_extractor = self._make_time_extractor_explicit(self.cams_free.coord_dim, time)
+
+        if vert_interp:
+            from src.physics.vinterp import interp_xarray
+            lev_dim = self.cams_free.vert_dim
+            assert lev_dim == "plev", "Only pressure-level coordinate supported for vertical interpolation!"
+
+            # plev is a fixed 1D coordinate — access directly, no get_data needed
+            assert self.cams_free.data is not None
+            p_cams = self.cams_free.data[lev_dim]  # (plev,), ascending pressure
+
+            p_obs = self.compute_p_obs()  # (time,)
+            tgtlevs, weights = interp_xarray(
+                p_src=p_cams,
+                p_tgt=p_obs.expand_dims({lev_dim: [0]}),
+                intp_dim_name=lev_dim,
+            )
+            tgtlevs = tgtlevs.squeeze(lev_dim)  # (time,)
+            weights = weights.squeeze(lev_dim)  # (time,)
+
+            # Load only the unique bracket levels
+            n_lev = p_cams.sizes[lev_dim]
+            lower = np.clip(tgtlevs.values.astype(int) - 1, 0, n_lev - 2)
+            upper = lower + 1
+            unique_levs = np.unique(np.concatenate([lower, upper]))
+            cams_slice = self.cams_free.get_data(
+                time=time_extractor, lev_idx=unique_levs.tolist(),
+                loc=loc, var_subset=var_subset
+            )
+
+            obs_dim = self.obs_index_dim
+            tgt_dims = list(tgtlevs.dims)
+            tgt_coords = {d: tgtlevs[d] for d in tgt_dims}
+            lower_pos = xr.DataArray(
+                np.searchsorted(unique_levs, lower),
+                dims=tgt_dims, coords=tgt_coords
+            )
+            upper_pos = xr.DataArray(
+                np.searchsorted(unique_levs, upper),
+                dims=tgt_dims, coords=tgt_coords
+            )
+            return self._with_obs_times(
+                (1.0 - weights) * cams_slice.isel({lev_dim: lower_pos}) +
+                 weights         * cams_slice.isel({lev_dim: upper_pos}),
+                time is None)
+
+
+        return self._with_obs_times(
+            self.cams_free.get_data(time=time_extractor, lev_idx=lev_idx,
+                                    loc=loc, var_subset=var_subset),
+            time is None)
+
+    def get_era5(self,
+                 time : Union[None, np.datetime64,
+                              List[np.datetime64],
+                              np.ndarray,
+                              xr.DataArray] = None,
+                 lev_idx : Union[None, int, List[int], xr.DataArray] = None,
+                 loc : Union[None, int, List[int], xr.DataArray] = None,
+                 var_subset : Union[None, str, List[str]] = None
+                 ) -> xr.Dataset:
+        """Get ERA5 data at requested times."""
+
+        # Default is exact co-location (space and time) with observations
+        if time is None:
+            time_extractor = self._make_time_extractor(self.era5.coord_dim)
+        else:
+            time_extractor = self._make_time_extractor_explicit(self.era5.coord_dim, time)
+        return self._with_obs_times(
+            self.era5.get_data(time=time_extractor, lev_idx=lev_idx,
+                               loc=loc, var_subset=var_subset),
+            time is None)
 
     def get_grid_xarray(self) -> xr.Dataset:
         return self.sparse.get_grid_xarray()
 
 
-    def to_xarray(self, lead_dim : str = 'time',
+    def to_xarray(self,
                   loc : Optional[Union[int, List[int]]] = None
                   ) -> xr.Dataset:
         """Convert to xarray Dataset
@@ -275,8 +404,7 @@ class ObsCollection:
         if loc is not None and isinstance(loc, int):
             loc = [loc]
 
-        if lead_dim not in self.coord_attrs:
-            raise ValueError(f"Lead dimension '{lead_dim}' must be one of {self.coord_attrs}")
+        lead_dim = self.obs_index_dim
 
         # Create coordinate arrays
         coords = {attr: (lead_dim, self.sparse.getv(attr, loc=loc))
@@ -295,10 +423,101 @@ class ObsCollection:
         return ds
 
 
+
+    def compute_p_obs(self):
+        """Calculate the pressure at observation altitude via ERA5 vertical interpolation.
+
+        Altitude at each ERA5 pressure level is derived from the hypsometric
+        equation (cumulative sum from the surface).  ERA5 plev is stored in
+        ascending pressure order (1 → 1000 hPa), i.e. descending altitude, so
+        z_lev is descending along plev.  The arrays are flipped before being
+        passed to regrid_pressure, which requires ascending p_src.
+        """
+        from src.physics.constants import CONST_G, CONST_Rd
+        from src.physics.optics import regrid_pressure
+
+        # get_era5() co-locates to each observation (coord + time) → (plev, time)
+        era5_obs = self.get_era5(lev_idx=None, var_subset=["t", "sp", "z_sfc"])
+        # Drop the obs-time coordinate: it must not propagate through the
+        # hypsometric computation and conflict with model-time coords downstream.
+        era5_obs = era5_obs.drop_vars("time", errors="ignore")
+        for var in ["t", "sp", "z_sfc"]:
+            assert var in era5_obs, f"ERA5 data must contain '{var}' for compute_p_obs"
+
+        vert_dim = self.era5.vert_dim
+        assert vert_dim is not None
+        assert vert_dim in era5_obs.dims, f"ERA5 data must contain vertical dimension '{vert_dim}' for compute_p_obs"
+
+        sp    = era5_obs["sp"]
+        z_sfc = era5_obs["z_sfc"] / CONST_G           # model surface altitude (m)
+        t     = era5_obs["t"]                         # temperature at each level
+        obs_dim = self.obs_index_dim
+        alt_obs_da = xr.DataArray(
+            self.sparse.getv("alt"), dims=[obs_dim],
+            coords={obs_dim: era5_obs[obs_dim]}
+        )
+
+        # When the model orography is above the observation, extrapolate sp downward
+        # to the observation altitude.  Leave sp unchanged otherwise.
+        t_sfc = t.isel({vert_dim: -1})  # near-surface temperature (1000 hPa level)
+        sp_corrected = xr.where(
+            z_sfc > alt_obs_da,
+            sp * np.exp(CONST_G * (z_sfc - alt_obs_da) / (CONST_Rd * t_sfc)),
+            sp,
+        )
+
+        # Pressure at each level clipped to the corrected surface pressure
+        # (sub-surface levels collapse to sp_corrected, giving dz = 0 there)
+        p_lev = era5_obs[vert_dim].clip(max=sp_corrected)
+
+        vax = p_lev.dims.index(vert_dim)  # axis of vert_dim after broadcasting
+
+        # Estimate pressure at half levels
+        p_half = np.concatenate(
+            [
+                p_lev.isel({vert_dim: [0]}).values / 2,
+                0.5 * (p_lev.isel({vert_dim: slice(None, -1)}).values +
+                       p_lev.isel({vert_dim: slice(1, None)}).values),
+                p_lev.isel({vert_dim: [-1]}).values,
+            ],
+            axis=vax,
+        )
+        dlogp = xr.DataArray(
+            data=np.diff(np.log(p_half), axis=vax),
+            coords=p_lev.coords,
+            dims=p_lev.dims,
+        )
+        # Positive layer altitude thickness: (Rd/g) * T * d(ln p) > 0
+        pos_dz = (CONST_Rd / CONST_G) * t * dlogp
+
+        # Altitude at level i = alt_obs + sum of layer thicknesses from i to surface.
+        # Anchoring to alt_obs (not z_sfc) ensures the column is always aligned
+        # with the actual observation, regardless of model terrain offset.
+        # Reverse cumsum: flip → cumsum → flip back.
+        flip = {vert_dim: slice(None, None, -1)}
+        z_lev = alt_obs_da + pos_dz.isel(flip).cumsum(dim=vert_dim).isel(flip)
+        # z_lev is descending along plev (high altitude at index 0 = 1 hPa).
+        z_lev = z_lev.isel(flip)
+        p_lev = p_lev.isel(flip)
+
+        # Each observation its altitude
+        obs_alt = alt_obs_da
+
+        # Interpolate pressure as a function of altitude → pressure at obs altitude
+        return regrid_pressure(
+            field_src=p_lev,
+            p_src=z_lev,
+            p_tgt=obs_alt.expand_dims("_z_obs"),
+            src_vdim=vert_dim,
+            tgt_vdim="_z_obs",
+        ).squeeze("_z_obs")
+
+
 class INPCollection(ObsCollection):
     """Subclass for INP data"""
 
-    dense_values = ["INP_conc"]
+    _own_dense_values: List[str] = ["INP_conc"]
+    _own_dense_dtypes: Dict = {}
     sparse_values = ["T", "RHw", "RHi"]
     gettable_sparse_vars = sparse_values
 
@@ -317,9 +536,6 @@ class INPCollection(ObsCollection):
 
         super().__init__(sparse_struct=INPIndexedCollection())
 
-        for dense_val in self.dense_values:
-            setattr(self, dense_val, DenseValue())
-
         super().initialise(non_index_attrs=self.dense_values,
                            extra_sparse_values=self.sparse_values)
 
@@ -330,12 +546,26 @@ class INPCollection(ObsCollection):
                                      lon_to_degeast=lon_to_degeast,
                                      t_approx_h=t_approx_h, sortbytime=sortbytime,
                                      timerange=timerange)
-        if cams_clim_path is not None:
+        else:
+            return
+
+        if cams_clim_path is not None and cams_clim_path != "":
             print(f"Loading CAMS climatology from {cams_clim_path}")
             self.load_cams_clim(cams_clim_path)
-        if cams_free_path is not None:
+
+        if cams_free_path is not None and cams_free_path != "":
             print(f"Loading CAMS free output from {cams_free_path}")
             self.load_cams_free(cams_free_path)
+
+        self.era5_points_file = get_era5_inpdb_path()
+        if self.era5_points_file != "" and self.era5_points_file is not None:
+            print(f"Loading ERA5 output from {self.era5_points_file}")
+            self.load_era5(self.era5_points_file)
+
+            self.era5_points_geopot_file = get_era5_inpdb_path(geopot=True)
+            print(f"Loading ERA5 geopotential output from {self.era5_points_geopot_file}")
+            self.load_era5_geopot(self.era5_points_geopot_file)
+
 
     def load_inp_collection(self, file_path: str,
                             n_lines: Optional[int] = None,
@@ -394,11 +624,14 @@ class INPCollection(ObsCollection):
             in_range = (df.time >= start) & (df.time <= end)
             df = df[in_range]
 
+        # Sort by time
+        df = df.sort_values('time').reset_index(drop=True)
+
         #self.instruments.extend(df['Instrument'].tolist())
         #self.instrument_types.extend(df['Instrument_Type'].tolist())
 
         # Build unique-value lists and per-row indexes via factorize
-        col_map = {
+        sparse_col_map = {
             'time': df['time'].values,
             'lon':  df['Lon'].to_numpy(dtype=float),
             'lat':  df['Lat'].to_numpy(dtype=float),
@@ -409,26 +642,37 @@ class INPCollection(ObsCollection):
             #'instrument': df['Instrument'].to_numpy(dtype=str),
             #'instrument_type': df['Instrument_Type'].to_numpy(dtype=str)
         }
+        dense_col_map = {}
+        inp_var_names = ["IN [L-1]", "INP_amb [L-1]"]
+        for inp_var in inp_var_names:
+            if inp_var in df.columns:
+                dense_col_map = {
+                    "INP_conc": df[inp_var].to_numpy(dtype=float)
+                }
+                break
+        if "INP_conc" not in dense_col_map:
+            raise ValueError(f"None of the expected INP concentration columns {inp_var_names} found in the CSV file.")
+
         if lonlat_approx is not None:
             for attr in ["lon", "lat"]:
-                values = col_map[attr]
-                col_map[attr] = np.round(values / lonlat_approx) * lonlat_approx
+                values = sparse_col_map[attr]
+                sparse_col_map[attr] = np.round(values / lonlat_approx) * lonlat_approx
 
         if lon_to_degeast:
-            col_map["lon"] = np.mod(col_map["lon"], 360)
+            sparse_col_map["lon"] = np.mod(sparse_col_map["lon"], 360)
 
         # Populate the sparse 1D index
-        for attr, values in col_map.items():
+        for attr, values in sparse_col_map.items():
             self.sparse.store(attr, values)
 
         # Populate coords
         self.sparse.set_coords()
 
-        # The dense values
-        #self.INP_conc.values = np.append(self.INP_conc.values, df['IN [L-1]'].to_numpy(dtype=float))
-        for dense_attr in self.dense_values:
-            dense_values = df[dense_attr].to_numpy(dtype=float)
-            getattr(self, dense_attr).values = np.append(getattr(self, dense_attr).values, dense_values)
+        # The dense values (obs_id is handled separately below)
+        for dense_attr, dense_vals in dense_col_map.items():
+            getattr(self, dense_attr).values = dense_vals  # type: ignore[attr-defined]
+
+        getattr(self, self.obs_index_dim).values = np.arange(len(self.sparse.getv("time")), dtype=np.int64)  # type: ignore[attr-defined]
 
     def get_cams_clim_inp(self,
                           inp_params: dict[str, INPParametrization],
@@ -444,7 +688,7 @@ class INPCollection(ObsCollection):
         Returns an xarray Dataset with one variable per parametrization plus a `total` variable."""
 
         # Get cams aerosol mass mixing ratios
-        cams_data = self.get_cams_clim(time, loc)
+        cams_data = self.get_cams_clim(loc=loc)
         temperature_data = None
         if T_source == "inpdb":
             temperature_data = self.sparse.getv("T")
@@ -483,7 +727,7 @@ class INPCollection(ObsCollection):
 
         # Get cams aerosol mass mixing ratios
         temperature_data = None
-        cams_data = self.get_cams_free(time, loc)
+        cams_data = self.get_cams_free(loc=loc)
         if T_source == "inpdb":
             temperature_data = self.sparse.getv("T")
         elif T_source == "era5":
@@ -526,6 +770,25 @@ class INPCollection(ObsCollection):
         # Ideal gas law to get air density from pressure and temperature
         air_density = self.p(loc=loc) / (constants.R_s * self.sparse.getv("T", loc=loc))
         return air_density
+
+    def _make_time_extractor_explicit(self, coord_dim: str, time) -> xr.DataArray:
+        """Expands to ``(obs_id, time)``: each observation's fixed location is paired
+        with all requested times, giving ``(obs_id, time[, lev])`` output.
+        """
+        if isinstance(time, xr.DataArray):
+            return time
+        obs_dim = self.obs_index_dim
+        obs_ids = getattr(self, obs_dim).values  # type: ignore[attr-defined]
+        time_arr = np.atleast_1d(np.asarray(time))
+        return xr.DataArray(
+            data=np.broadcast_to(time_arr[np.newaxis, :], (len(obs_ids), len(time_arr))),
+            dims=[obs_dim, "time"],
+            coords={
+                obs_dim: obs_ids,
+                "time": time_arr,
+                coord_dim: (obs_dim, self.sparse.coord.index)
+            }
+        )
 
 
 class ObsStation:
@@ -717,9 +980,8 @@ class StationsCollection:
         )
         self._swap_model_dim_to_station_name(era5_geopot)
 
-        assert self.era5.data is not None
-        assert era5_geopot.data is not None
-        self.era5.data["z_sfc"] = era5_geopot.data["z"].squeeze(drop=True)
+        if self.era5.data is not None and era5_geopot.data is not None:
+            self.era5.data["z_sfc"] = era5_geopot.data["z"].squeeze(drop=True)
 
     def get_merra2(self,
                    time : Union[np.datetime64,
@@ -783,7 +1045,8 @@ class StationsCollection:
                        loc : Union[None, int, List[int], xr.DataArray] = None,
                        var_subset : Union[None, str, List[str]] = None
                       ) -> xr.Dataset:
-        """Get CAMS climatology interpolated to times."""
+        """Get CAMS climatology interpolated to times.
+        """
 
         if isinstance(time, np.datetime64):
             time = [time]
@@ -799,7 +1062,8 @@ class StationsCollection:
             time_extractor = time
 
         return self.cams_clim.get_data(time=time_extractor, lev_idx=lev_idx,
-                                       loc=loc, var_subset=var_subset)
+                                                 loc=loc, var_subset=var_subset)
+
 
     def get_cams_free(self,
                       time : Union[np.datetime64,
@@ -901,9 +1165,9 @@ class AeronetCollection(StationsCollection):
     aod_wl_defaults = [340, 380, 440, 500, 550, 675, 870, 1020]
     ae_wl_defaults = [(440, 870), (380, 500), (440, 675), (500, 870), (340, 440), (440, 675)]
 
-    # cams_clim_points_file : str = get_cams_clim_aeronet_path()
-    # cams_free_points_file : str = get_cams_free_aeronet_path()
-    # macv2sp_points_file : str = get_macv2sp_aeronet_path()
+    cams_clim_points_file : str = get_cams_clim_aeronet_path(data_product="AOD")
+    cams_free_points_file : str = get_cams_free_aeronet_path(data_product="AOD")
+    #macv2sp_points_file : str = get_macv2sp_aeronet_path()
 
     def __init__(self, aeronet_dir_path : Optional[str] = None,
                  cams_clim_path : Optional[str] = None,
@@ -939,13 +1203,16 @@ class AeronetCollection(StationsCollection):
 
         self.era5_points_file = get_era5_aeronet_path(aeronet_freq=aeronet_freq)
 
-        if aeronet_dir_path is not None:
-            print(f"Loading Aeronet collection from {aeronet_dir_path}")
-            self.load_aeronet_collection(aeronet_dir_path,
-                                         header_lines=6,
-                                         aeronet_freq=aeronet_freq,
-                                         aeronet_lev=aeronet_lev,
-                                         timerange=timerange)
+        if aeronet_dir_path is None:
+            return
+
+
+        print(f"Loading Aeronet collection from {aeronet_dir_path}")
+        self.load_aeronet_collection(aeronet_dir_path,
+                                        header_lines=6,
+                                        aeronet_freq=aeronet_freq,
+                                        aeronet_lev=aeronet_lev,
+                                        timerange=timerange)
 
         if cams_clim_path != "" and cams_clim_path is not None:
             print(f"Loading CAMS climatology from {cams_clim_path}")
@@ -975,7 +1242,7 @@ class AeronetCollection(StationsCollection):
             # except Exception as exc:
             #     print(f"Warning: Failed to load MERRA2 from {merra2_path}: {exc}")
 
-        if aeronet_dir_path is not None and self.era5_points_file != "" and self.era5_points_file is not None:
+        if self.era5_points_file != "" and self.era5_points_file is not None:
             print(f"Loading ERA5 output from {self.era5_points_file}")
             # try:
             self.load_era5(self.era5_points_file)
@@ -983,7 +1250,8 @@ class AeronetCollection(StationsCollection):
             #     print(f"Warning: Failed to load ERA5 output from {self.era5_points_file}: {exc}")
 
             self.era5_points_geopot_file = get_era5_aeronet_path(aeronet_freq=aeronet_freq,
-                                                            geopot=True)
+                                                                 aeronet_product="AOD",
+                                                                 geopot=True)
             print(f"Loading ERA5 geopotential output from {self.era5_points_geopot_file}")
             # try:
             self.load_era5_geopot(self.era5_points_geopot_file)
@@ -1008,6 +1276,7 @@ class AeronetCollection(StationsCollection):
         if synth_files == []:
             # Get most recent
             print(f"No synthesis file found at {synth_file_name_like}, generating from all data. Will take a while")
+            print(f"Looking under {aeronet_dir_path}")
             all_aeronet_files = glob(os.path.join(aeronet_dir_path, f"*.{aeronet_lev}"))
             all_aeronet_files.sort()
 

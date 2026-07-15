@@ -15,6 +15,7 @@ def build_inp_collection(inpdb_csv_path : Optional[str] = None,
                          ) -> INPCollection:
     """Helper function to build collection from file path and parameters
     n_lines : how many lines of the csv to read (useful for testing)
+    pass path "" to ignore: e.g. cams_free_sites_path = "" will skip loading CAMS free data
     """
     import os
     from glob import glob
@@ -36,13 +37,13 @@ def build_inp_collection(inpdb_csv_path : Optional[str] = None,
     if cams_clim_sites_path is None:
         cams_clim_sites_path = get_cams_clim_sites_path()
     # Preliminary sanity checks
-    elif not os.path.exists(cams_clim_sites_path):
+    elif not os.path.exists(cams_clim_sites_path) and not cams_clim_sites_path == "":
         raise ValueError(f"Provided path {cams_clim_sites_path} not found.")
 
     if cams_free_sites_path is None:
         cams_free_sites_path = get_cams_free_sites_path()
     # Preliminary sanity checks
-    elif isinstance(cams_free_sites_path, str):
+    elif isinstance(cams_free_sites_path, str) and not cams_free_sites_path == "":
         cams_free_sites_path = [cams_free_sites_path]
         allfiles = []
         for path in cams_free_sites_path:
@@ -139,7 +140,7 @@ def build_aeronet_collection(
         raise ValueError(f"Provided path {aeronet_sites_dir} not found.")
 
     if cams_clim_aeronet_path is None:
-        cams_clim_aeronet_path = get_cams_clim_aeronet_path()
+        cams_clim_aeronet_path = get_cams_clim_aeronet_path(data_product="AOD")
     # Preliminary sanity checks
     elif not os.path.exists(cams_clim_aeronet_path):
         raise ValueError(f"Provided path {cams_clim_aeronet_path} not found.")
@@ -157,7 +158,7 @@ def build_aeronet_collection(
         raise ValueError(f"Provided path {merra2_aeronet_path} not found.")
 
     if cams_free_aeronet_path is None:
-        cams_free_aeronet_path = get_cams_free_aeronet_path()
+        cams_free_aeronet_path = get_cams_free_aeronet_path(data_product="AOD")
     # Preliminary sanity checks
     elif isinstance(cams_free_aeronet_path, str) and not cams_free_aeronet_path == "":
         cams_free_aeronet_path = [cams_free_aeronet_path]
@@ -215,7 +216,7 @@ def build_aeronet_collection(
     if this_cams_clim_aeronet_path is None:
         from src.utils.cams import gen_cams_pointinterp
         gen_cams_pointinterp(aeronet_coll, overwrite=overwrite)
-        aeronet_coll.load_cams_clim(get_cams_clim_aeronet_path())
+        aeronet_coll.load_cams_clim(get_cams_clim_aeronet_path(data_product="AOD"))
 
     if this_macv2sp_aeronet_path is None:
         from src.utils.macv2sp import gen_macv2sp_pointinterp
