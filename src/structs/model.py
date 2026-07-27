@@ -142,6 +142,30 @@ class MacV2SPHandler(ModelHandler):
         return this_data.sel(**sel_dict) if sel_dict else this_data
 
 
+class MacV2NatHandler(ModelHandler):
+    def get_data(self,
+                 time : Union[np.datetime64, List[np.datetime64], xr.DataArray],
+                 loc : Union[None, int, List[int], xr.DataArray] = None,
+                 var_subset : Union[None, str, List[str]] = None
+                 ) -> xr.Dataset:
+        """Returns the data interpolated to the requested times using monthly climatology."""
+        from src.utils.cams import interpolate_monthly_clim
+
+        if self.data is None:
+            raise ValueError("MACv2-NAT data not loaded.")
+
+        if not isinstance(time, xr.DataArray):
+            if not isinstance(time, list):
+                time = [time]
+            time = xr.DataArray(time, dims="time", coords={"time": time})
+        this_data = self.data
+        if loc is not None:
+            this_data = this_data.sel({self.coord_dim: loc})
+        if var_subset is not None:
+            this_data = this_data[var_subset]
+        return interpolate_monthly_clim(this_data, time)
+
+
 class CamsClimHandler(ModelHandler):
 
     def get_data(self,

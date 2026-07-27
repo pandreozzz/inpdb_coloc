@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Union, Optional, List, Tuple, Self, Literal
+from typing import Dict, Union, Optional, List, Tuple, Self, Literal, cast
 import os
 
 
@@ -14,7 +14,7 @@ from ..config import AeronetFreq, AeronetLevel
 from .sparser import SparseIndexedCollection, INPIndexedCollection, AeronetIndexedCollection
 from .cores import DenseValue
 from .model import ModelHandler, CamsClimHandler, CamsOutputHandler, \
-      ERA5DataHandler, MacV2SPHandler, MERRA2Handler
+      ERA5DataHandler, MacV2SPHandler, MacV2NatHandler, MERRA2Handler
 from ..physics.inp import INPParametrization
 from ..physics.aerosol import AerosolSpec
 
@@ -832,9 +832,12 @@ class StationsCollection:
 
     def __init__(self):
         self.stations = {}
+        self.handlers  : List[str] = ["cams_clim", "cams_free", "era5",
+                                       "macv2sp", "macv2nat", "merra2"]
         self.cams_clim = CamsClimHandler(vert_dim="lev")
         self.cams_free = CamsOutputHandler(vert_dim="plev")
         self.era5 = ERA5DataHandler(vert_dim="plev")
+        self.macv2nat  : MacV2NatHandler = MacV2NatHandler(vert_dim=None)
 
     def _swap_model_dim_to_station_name(self, model_handler: ModelHandler) -> None:
         """Promote the station_name coordinate to the active horizontal dimension."""
@@ -865,11 +868,12 @@ class StationsCollection:
         get_subset_kwargs = {"coord_values": stations_coords,
                              "coords_to_assign": {"station_name": subset.station_names},
                              "atol": self.coord_atol}
-        subset.cams_clim = self.cams_clim.get_subset(**get_subset_kwargs)
-        subset.cams_free = self.cams_free.get_subset(**get_subset_kwargs)
-        subset.era5 = self.era5.get_subset(**get_subset_kwargs)
-        subset.macv2sp = self.macv2sp.get_subset(**get_subset_kwargs)
-        subset.merra2 = self.merra2.get_subset(**get_subset_kwargs)
+        for handler_name in self.handlers:
+            if hasattr(self, handler_name):
+                handler = getattr(self, handler_name)
+                if isinstance(handler, ModelHandler):
+                    subset_handler = cast(ModelHandler, handler.get_subset(**get_subset_kwargs))
+                    setattr(subset, handler_name, subset_handler)
 
         # Now swap_dims to station_name
         for model_dset_name in ["cams_clim", "cams_free", "era5"]:
@@ -914,8 +918,15 @@ class StationsCollection:
         """Extract subset region
         Returns the subset collection and the list of coordinate indexes
         """
+        lon_west = lon_west % 360.0
+        lon_east = lon_east % 360.0
+        def _lon_in_region(lon: float) -> bool:
+            if lon_west <= lon_east:
+                return lon_west <= lon <= lon_east
+            else:
+                return lon >= lon_west or lon <= lon_east
         stations_in_region = [name for name, station in self.stations.items()
-                              if lon_west <= station.lon <= lon_east and lat_south <= station.lat <= lat_north]
+                              if lat_south <= station.lat <= lat_north and _lon_in_region(station.lon % 360.0)]
         return self.get_subset(stations=stations_in_region)
 
     def load_merra2(self, merra2_path: str):
@@ -982,6 +993,82 @@ class StationsCollection:
 
         if self.era5.data is not None and era5_geopot.data is not None:
             self.era5.data["z_sfc"] = era5_geopot.data["z"].squeeze(drop=True)
+
+    def add_cams_clim(self, clim_path: str,
+                      cams_clim_id : str, lev_dim : str = "lev") -> None:
+        """Attach a CamsClimHandler under a custom attribute name and register it in self.handlers."""
+        if hasattr(self, cams_clim_id):
+            raise ValueError(f"Attribute '{cams_clim_id}' already exists in StationsCollection.")
+        cams_clim_handler = CamsClimHandler(vert_dim=lev_dim)
+        cams_clim_handler.from_ncfile(clim_path)
+        cams_clim_handler = cast(CamsClimHandler, cams_clim_handler.get_subset(
+            coord_values=np.asarray(self.stations_coords),
+            coords_to_assign={"station_name": self.station_names},
+            atol=self.coord_atol))
+        self._swap_model_dim_to_station_name(cams_clim_handler)
+        setattr(self, cams_clim_id, cams_clim_handler)
+        self.handlers.append(cams_clim_id)
+
+    def load_macv2nat(self, macv2nat_path: str, ref_year : int = 2005) -> None:
+        """Load MACv2 natural aerosol climatology and align to station coordinates.
+        MACv2-SP must be loaded first (wavelength axis is taken from it).
+        """
+        assert self.macv2sp.data is not None, "Load MACv2-SP data before MACv2-NAT."
+
+        open_kwargs : dict = {}
+        if macv2nat_path.endswith(".nc"):
+            open_kwargs["engine"] = "netcdf4"
+        else:
+            open_kwargs["engine"] = "zarr"
+        macv2nat_ds = xr.open_dataset(macv2nat_path, **open_kwargs)  # type: ignore
+
+        required_wls = np.sort(self.macv2sp.data["wavelength"].values)
+        available_wls = np.sort(macv2nat_ds["wavelength"].values)
+        missing_wls = [wl for wl in required_wls if wl not in available_wls]
+        if missing_wls:
+            macv2nat_ds = xr.concat([
+                macv2nat_ds,
+                xr.full_like(
+                    macv2nat_ds.isel(wavelength=[0] * len(missing_wls)),
+                    fill_value=np.nan
+                ).assign_coords({"wavelength": missing_wls})],
+                dim="wavelength")
+            aod_da = macv2nat_ds["aod"]
+            ssa_da = macv2nat_ds["ssa"]
+            asy_da = macv2nat_ds["asy"]
+            from ..physics.optics import angstrom_fill_nans
+            for wl_tgt in required_wls:
+                angstrom_fill_nans(aod_da, wl_tgt, wl_dim="wavelength")
+                angstrom_fill_nans(ssa_da, wl_tgt, wl_dim="wavelength")
+                angstrom_fill_nans(asy_da, wl_tgt, wl_dim="wavelength")
+        else:
+            aod_da = macv2nat_ds["aod"]
+            ssa_da = macv2nat_ds["ssa"]
+            asy_da = macv2nat_ds["asy"]
+
+        self.macv2nat.data = xr.Dataset({
+            "aod": aod_da,
+            "ssa": ssa_da,
+            "asy": asy_da,
+        }).sel(wavelength=required_wls)
+        self.macv2nat = cast(MacV2NatHandler, self.macv2nat.get_subset(
+            coord_values=np.asarray(self.stations_coords),
+            coords_to_assign={"station_name": self.station_names},
+            atol=self.coord_atol))
+        self._swap_model_dim_to_station_name(self.macv2nat)
+
+    def get_macv2nat(self,
+                     time : Union[np.datetime64, List, np.ndarray, xr.DataArray],
+                     loc : Union[None, int, List[int], xr.DataArray] = None,
+                     var_subset : Union[None, str, List[str]] = None) -> xr.Dataset:
+        """Get MACv2 natural aerosol climatology at requested times."""
+        if isinstance(time, np.datetime64):
+            time = [time]
+        if not isinstance(time, xr.DataArray):
+            time_extractor = xr.DataArray(data=time, dims=["time"], coords={"time": time})
+        else:
+            time_extractor = time
+        return self.macv2nat.get_data(time=time_extractor, loc=loc, var_subset=var_subset)
 
     def get_merra2(self,
                    time : Union[np.datetime64,
@@ -1173,6 +1260,7 @@ class AeronetCollection(StationsCollection):
                  cams_clim_path : Optional[str] = None,
                  cams_free_path : Union[None, str, List[str]] = None,
                  macv2sp_path : Optional[str] = None,
+                 macv2nat_path : Optional[str] = None,
                  merra2_path : Optional[str] = None,
                  timerange: Optional[Tuple[str, str]] = None,
                  aod_wl : List[int] = aod_wl_defaults,
@@ -1234,6 +1322,10 @@ class AeronetCollection(StationsCollection):
             self.load_macv2sp(macv2sp_path)
             # except Exception as exc:
             #     print(f"Warning: Failed to load MACv2-SP from {macv2sp_path}: {exc}")
+
+        if macv2nat_path != "" and macv2nat_path is not None:
+            print(f"Loading MACv2 natural climatology from {macv2nat_path}")
+            self.load_macv2nat(macv2nat_path)
 
         if merra2_path != "" and merra2_path is not None:
             print(f"Loading MERRA2 from {merra2_path}")
@@ -1416,7 +1508,9 @@ class AeronetCollection(StationsCollection):
 
     def get_obs_aod(self,
                     include_precipitable_water: bool = True,
-                    angstrom_fill : bool = True
+                    angstrom_fill : bool = True,
+                    aod_wl: Optional[List[int]] = None,
+                    ae_wl: Optional[List[Tuple[int, int]]] = None,
                     ) -> xr.Dataset:
         """Return observed AERONET AOD (and optionally AE / precipitable water)
         as an xarray Dataset with dimensions ``(time, station_name)``.
@@ -1444,7 +1538,7 @@ class AeronetCollection(StationsCollection):
         aod_cols = [c for c in df.columns if re.match(r"AOD_\d+nm", c)]
         #wl_tags = {f"AOD_{wl}nm" for wl in self.aod_wl}
         #aod_wl = [wl for wl in self.aod_wl if f"AOD_{wl}nm" in aod_cols]
-        aewl_tags = {f"{wl[0]}-{wl[1]}_Angstrom_Exponent" for wl in self.ae_wl}
+        aewl_tags = {f"{wl[0]}-{wl[1]}_Angstrom_Exponent" for wl in (ae_wl or self.ae_wl)}
         ae_cols = [c for c in df.columns if c in aewl_tags]
 
         extra_cols: List[str] = []
@@ -1483,7 +1577,7 @@ class AeronetCollection(StationsCollection):
         )
 
         # All wavelength labels stay as integers for consistent label lookup.
-        target_wl = np.asarray(self.aod_wl, dtype=int)
+        target_wl  = np.asarray(aod_wl or self.aod_wl, dtype=int)
         obs_wl = aod_da["wavelength_nm"].values.astype(int)
         # support_wl = observed ∪ target; keeps bracketing wavelengths available for Angstrom fill
         support_wl = np.unique(np.concatenate([obs_wl, target_wl]))
@@ -1499,17 +1593,20 @@ class AeronetCollection(StationsCollection):
         aod_da = aod_da.sel(wavelength_nm=target_wl)  # drop support-only wavelengths
         ds["AOD"] = aod_da
 
-        ds["AE"] = xr.concat(
-            [ds[ae_var].expand_dims(
-                wavelength_ae_nm=["-".join(re.search(r"(\d+)-(\d+)_Angstrom_Exponent", ae_var).groups())] #type: ignore
-            ) for ae_var in ae_cols],
-            dim="wavelength_ae_nm"
-        )
-        ds = ds.drop_vars(aod_cols + ae_cols)  # drop original columns
+        if ae_cols != []:
+            ds["AE"] = xr.concat(
+                [ds[ae_var].expand_dims(
+                    wavelength_ae_nm=["-".join(re.search(r"(\d+)-(\d+)_Angstrom_Exponent", ae_var).groups())]  # type: ignore
+                ) for ae_var in ae_cols],
+                dim="wavelength_ae_nm",
+            )
+            ds = ds.drop_vars(aod_cols + ae_cols)  # drop original columns
 
         return ds
 
-    _AODSources = Literal["cams_clim", "cams_clim_natural", "cams_free", "macv2sp", "merra2"]
+    _AODSources = Literal["cams_clim", "cams_clim_natural", "cams_free",
+                          "macv2sp+cams", "macv2sp", "merra2", "macv2nat",
+                          "volc_glossac"]
     def calculate_aod(self,
                       times : Union[None, np.ndarray, xr.DataArray] = None,
                       source : _AODSources = "cams_clim",
@@ -1520,6 +1617,7 @@ class AeronetCollection(StationsCollection):
                       optics_lut_path : Optional[str] = None,
                       clip_z_to_station : bool = True,
                       recompute : bool = False,
+                      skip_ae: bool = True,
                       n_workers : int = 1,
                       show_progress : bool = True):
         """Compute offline AOD from the aerosol fields and ERA5 relative humidity.
@@ -1555,7 +1653,17 @@ class AeronetCollection(StationsCollection):
             self._aod_cache = {}
 
         if wavelengths_nm is None:
-            wavelengths_nm = tuple(self.aod_wl)
+            assert self.aod_wl is not None, "AOD wavelengths not set."
+            wavelengths_nm = tuple(sorted(set(self.aod_wl)))
+
+        # Ensure ae wl in wavelengths_nm when AE is requested
+        if not skip_ae and self.ae_wl is not None:
+            all_ae_wls: List[int] = []
+            for wl_couple in self.ae_wl:
+                all_ae_wls.extend(wl_couple)
+            wavelengths_nm_tmp = tuple(sorted(set(list(wavelengths_nm) + all_ae_wls)))
+        else:
+            wavelengths_nm_tmp = wavelengths_nm
 
         if times is None:
             time_key = None
@@ -1564,7 +1672,9 @@ class AeronetCollection(StationsCollection):
         else:
             tvals = np.asarray(getattr(times, "values", times), dtype="datetime64[ns]")
             time_key = (str(tvals.min()), str(tvals.max()), int(tvals.size))
-        cache_key = (source, chunk, tuple(wavelengths_nm), bool(per_species),
+        cache_key = (source, chunk,
+                     tuple(wavelengths_nm), bool(per_species),
+                     bool(skip_ae),
                      aero_opt_ver, time_key, bool(clip_z_to_station))
 
         if not recompute and cache_key in self._aod_cache:
@@ -1579,9 +1689,36 @@ class AeronetCollection(StationsCollection):
             handler = self.get_cams_clim(time=times, lev_idx=None)[natural_aerospecs + ["pressure"]]
             vert_dim = self.cams_clim.vert_dim
         elif source == "cams_free":
-            handler = self.get_cams_free(time=times, lev_idx=None)  # all levels
-            vert_dim = self.cams_free.vert_dim
-        elif source == "macv2sp":
+            handler_ds = self.get_cams_free(time=times, lev_idx=None)  # all levels
+            # And AE would be missing?
+            var_list = []
+            missing_wls = []
+            for wl in wavelengths_nm_tmp:
+                var_name = f"aod{wl:d}"
+                if var_name in handler_ds.data_vars:
+                    var_list.append(handler_ds[var_name].expand_dims(wavelength=[wl]))
+                else:
+                    missing_wls.append(wl)
+            if missing_wls:
+                if not var_list:
+                    raise ValueError(f"No CAMS free AOD data available for wavelengths {missing_wls}")
+                var_list.extend([xr.full_like(var_list[0], None).assign_coords(wavelength=[wl]) for wl in missing_wls])
+            aod_da = xr.concat(var_list, dim="wavelength").sortby("wavelength")
+
+            aod_ds = xr.Dataset(data_vars={"AOD": aod_da})
+
+            # Angstrom fill missing values
+            if missing_wls:
+                print(f"Angstrom fill of missing wls: {missing_wls}")
+                print("not implemented yet")
+                pass
+            if not skip_ae:
+                print(f"No AE calculation yet implemented")
+                pass
+            return aod_ds.sel(wavelength=list(wavelengths_nm))
+
+
+        elif source == "macv2sp+cams":
             handler = None
             result = self.calculate_aod(times=times, source="cams_clim_natural", chunk=chunk,
                                              wavelengths_nm=wavelengths_nm,
@@ -1593,11 +1730,58 @@ class AeronetCollection(StationsCollection):
                                              n_workers=n_workers,
                                              show_progress=show_progress).rename({"AOD": "AOD_natural"})
             result["AOD_anthropogenic"] = self.get_macv2sp(time=times)["aod_2D"]
+            result["AOD_tropo"] = result["AOD_tropo"] + result["AOD_anthropogenic"]
             result["AOD"] = result["AOD_natural"] + result["AOD_anthropogenic"]
 
             self._aod_cache[cache_key] = result
 
             return self._aod_cache[cache_key]
+        elif source == "macv2sp":
+            from src.physics.volcaero import get_glossac_aod
+            result = self.calculate_aod(
+                times=times, source="macv2nat", chunk=chunk,
+                wavelengths_nm=wavelengths_nm, per_species=False,
+                aero_opt_ver=aero_opt_ver, optics_lut_path=optics_lut_path,
+                clip_z_to_station=clip_z_to_station, recompute=recompute,
+                n_workers=n_workers, show_progress=show_progress,
+            )
+            result["AOD_anthropogenic"] = (self.get_macv2sp(time=times)["aod_2D"]
+                                           .sortby("wavelength")
+                                           .sel(wavelength=list(wavelengths_nm), method="nearest"))
+            result["AOD_tropo"] = result["AOD_tropo"] + result["AOD_anthropogenic"]
+            result["AOD"] = result["AOD_natural"] + result["AOD_anthropogenic"]
+            self._aod_cache[cache_key] = result
+            return result
+
+        elif source == "macv2nat":
+            from src.physics.volcaero import get_glossac_aod
+            aod_natural = (self.get_macv2nat(time=times)["aod"]
+                         .rename("AOD_natural")
+                         .sortby("wavelength")
+                         .sel(wavelength=list(wavelengths_nm), method="nearest")
+                         .sortby("wavelength")
+                         )
+            result = xr.Dataset(data_vars={"AOD_tropo": aod_natural})
+            result["AOD_volc_glossac"] = (get_glossac_aod()
+                .interp(lat=result.lat, method="linear")
+                .rename(wavelength_nm="wavelength")
+                .sel(wavelength=list(wavelengths_nm), method="nearest")
+                .sel(time=result.time, method="nearest")
+                ).sortby("wavelength")
+            result["AOD_natural"] = result["AOD_tropo"] + result["AOD_volc_glossac"]
+            self._aod_cache[cache_key] = result
+            return result
+
+        elif source == "volc_glossac":
+            from src.physics.volcaero import get_glossac_aod
+            assert self.era5.data is not None
+            glossac_aod = (get_glossac_aod()
+                .interp(lat=self.era5.data.lat, method="linear")
+                .sel(wavelength_nm=list(wavelengths_nm), method="nearest"))
+            result = xr.Dataset(data_vars={"AOD_volc_glossac": glossac_aod})
+            self._aod_cache[cache_key] = result
+            return result
+
         elif source == "merra2":
             handler = None
             result = self.get_merra2(time=times)[["AODANA"]].rename(
@@ -1629,7 +1813,8 @@ class AeronetCollection(StationsCollection):
                                   lev_dim=vert_dim,
                                   surface_pressure=surface_pressure,
                                   n_workers=n_workers,
-                                  show_progress=show_progress)
+                                  show_progress=show_progress,
+                                  wavelengths_nm=list(wavelengths_nm_tmp))
         # Add accessory coordinates from era5
         era5_coords = self.era5.data.coords
         for coord in era5_coords:
@@ -1640,7 +1825,7 @@ class AeronetCollection(StationsCollection):
         from src.physics.volcaero import get_glossac_aod
         try:
             print("Adding volcanic aerosol AOD from GloSSAC dataset")
-            glossac_aod = get_glossac_aod().interp(lat=result.lat, method="linear").sel(wavelength_nm=result.wavelength, method="nearest")
+            glossac_aod = get_glossac_aod().interp(lat=result.lat, method="linear").rename(wavelength_nm="wavelength").sel(wavelength=result.wavelength, method="nearest")
             if result.time.min() < glossac_aod.time.min() - np.timedelta64(365, "D") or \
                 result.time.max() > glossac_aod.time.max() + np.timedelta64(365, "D"):
                 print("Warning: AOD volcanic data is more than 1 year out of bounds of the requested times.")
@@ -1653,13 +1838,15 @@ class AeronetCollection(StationsCollection):
             result = result.rename({"AOD_total": "AOD_tropo"})
             result["AOD"] = result["AOD_tropo"] + result["AOD_volc_glossac"]
 
-
-        ae_values = []
-        for ae_wl in self.ae_wl:
-            ae_coord = f"{ae_wl[0]}-{ae_wl[1]}"
-            ae_values.append((np.log(result.sel(wavelength=ae_wl[0])["AOD"] / result.sel(wavelength=ae_wl[1])["AOD"]) / np.log(ae_wl[1] / ae_wl[0])).expand_dims(wavelength_ae=[ae_coord]))
-
-        result["AE"] = xr.concat(ae_values, dim="wavelength_ae")
+        if not skip_ae:
+            result["AE"] = xr.concat(
+                [(np.log(result.sel(wavelength=w[0])["AOD"] /
+                        result.sel(wavelength=w[1])["AOD"]) /
+                np.log(w[1] / w[0])).expand_dims(wavelength_ae=[f"{w[0]}-{w[1]}"])
+                for w in self.ae_wl],
+                dim="wavelength_ae",
+            )
+            result = result.sel(wavelength=wavelengths_nm).sortby("wavelength").sortby("wavelength_ae")
 
         self._aod_cache[cache_key] = result
 

@@ -27,6 +27,7 @@ MERRA2_DATADIR = os.path.join(DATADIR, "merra2")
 CONFIGDICT_DEF: Dict[str, Any] = {
     "merra2_aeronet_filelike" : "merra2.instM_2d_gas_Nx_AOD_MERGED_1degshifted_aeronet.nc",
     "macv2sp_aeronet_filelike" : "MACv2-SP_2Dfields_T63_1km_1980_2020_aeronet.nc",
+    "macv2nat_aeronet_filelike" : "gt_n_aeronet.nc",
     "volcaero_file" : "GLOSSAC_EVA_prescribed_1980_2020_aeronetwls.nc",
     "lonlat_approx" : 0.1,
     "t_approx_h" : True,
@@ -62,6 +63,16 @@ def get_macv2sp_aeronet_path() -> str:
     this_tag = f"aeronet-{CONFIGDICT['aeronet_freq']}_AOD-{CONFIGDICT['aeronet_tag']}"
     return os.path.join(MACV2SP_DATADIR, "point_files",
                         CONFIGDICT["macv2sp_aeronet_filelike"].replace("aeronet.nc", f"{this_tag}.nc"))
+
+def get_macv2nat_aeronet_path() -> str:
+    """Get the path to the MACv2 natural aerosol aeronet file based on the current configuration."""
+    if "macv2nat_aeronet_filelike" not in CONFIGDICT:
+        raise ValueError("macv2nat_aeronet_filelike not set in CONFIGDICT. Call digest_config first.")
+    if CONFIGDICT["macv2nat_aeronet_filelike"] is None:
+        return ""
+    this_tag = f"aeronet-{CONFIGDICT['aeronet_freq']}_AOD-{CONFIGDICT['aeronet_tag']}-nat"
+    return os.path.join(MACV2SP_DATADIR, "point_files",
+                        CONFIGDICT["macv2nat_aeronet_filelike"].replace("aeronet.nc", f"{this_tag}.nc"))
 
 def get_volcaero_path() -> str:
     """Get the path to the VolcAero file based on the current configuration."""

@@ -77,7 +77,10 @@ def open_macv2sp_output(output_path : Union[str, List[str]]) -> xr.Dataset:
 
     def _process_times(ds):
         import re
+        if "time" not in ds.dims:
+            return ds
         grp_match = re.search(r"(.+) since (.+)", ds.time.units)
+        assert grp_match is not None and len(grp_match.groups()) == 2, f"Unexpected time units format: {ds.time.units}"
         assert grp_match is not None and len(grp_match.groups()) == 2, f"Unexpected time units format: {ds.time.units}"
         since_time_split = grp_match.groups()[1].split(" ")
         y, m, d = since_time_split[0].split("-")
@@ -130,3 +133,94 @@ def open_macv2sp_output(output_path : Union[str, List[str]]) -> xr.Dataset:
         this_data["wavelength"].attrs[k] = v
 
     return this_data
+
+
+def open_macv2nat_output(output_path: Union[str, List[str]]) -> xr.Dataset:
+    """Load MACv2 natural aerosol output files (one per wavelength) and concatenate along ``wavelength``.
+
+    Each file name must contain ``_<NNN>nm`` where NNN is the wavelength in nm.
+    The time dimension is converted to a ``month`` dimension (1–12).
+    """
+    import re
+    from glob import glob
+
+    def _convert_time_to_month(ds: xr.Dataset) -> xr.Dataset:
+        if "time" not in ds.dims:
+            return ds
+        return (ds
+                .assign_coords(month=("time", list(ds.time.dt.month.values)))
+                .swap_dims({"time": "month"})
+                .sortby("month")
+                .drop_vars("time"))
+
+    if not isinstance(output_path, list):
+        output_path = [output_path]
+    all_files = list(set(f for p in output_path for f in glob(p)))
+    if not all_files:
+        raise ValueError("No MACv2 natural climatology files found.")
+
+    opends_kwargs: Dict[str, Any] = {"decode_times": True}
+    if all_files[0].endswith("zarr"):
+        opends_kwargs["engine"] = "zarr"
+    else:
+        opends_kwargs["engine"] = "netcdf4"
+
+    return xr.concat(
+        [_convert_time_to_month(xr.open_dataset(f, **opends_kwargs)).expand_dims(
+            wavelength=[int(re.search(r".*_(\d+)nm['_zarr','.nc']{1}", f).group(1))])  # type: ignore
+         for f in all_files],
+        dim="wavelength",
+    ).sortby("wavelength")
+
+
+def gen_macv2nat_pointinterp(macv2nat_points_fpath: str,
+                             obs_coll: StationsCollection,
+                             overwrite: bool = False) -> None:
+    """Interpolate MACv2 natural aerosol source files (``gt_n_0*nm.nc``) to the
+    collection's station locations and save the result to *macv2nat_points_fpath*.
+    """
+    import os
+    import tempfile
+    import numpy as np
+    from glob import glob
+    from src.config import MACV2SP_DATADIR
+    from src.utils.cdoers import gen_griddes_unstructured, cdo_interpolate_2d
+
+    if os.path.exists(macv2nat_points_fpath):
+        if not overwrite:
+            print(f"MACv2-SP natural already at sites: {os.path.basename(macv2nat_points_fpath)}. Skipping.")
+            return
+        print(f"Overwriting {macv2nat_points_fpath}.")
+        os.remove(macv2nat_points_fpath)
+
+    griddes_file = obs_coll.griddes_file
+    if overwrite and os.path.exists(griddes_file):
+        os.remove(griddes_file)
+    if not os.path.exists(griddes_file):
+        print(f"Creating griddes file at {griddes_file}")
+        locs = obs_coll.get_grid_xarray()
+        griddes_str = gen_griddes_unstructured(locs.lon.values.tolist(), locs.lat.values.tolist())
+        with open(griddes_file, "w") as fh:
+            fh.write(griddes_str)
+
+    orig_pattern = os.path.join(MACV2SP_DATADIR, "gt_n_0*nm.nc")
+    orig_files = glob(orig_pattern)
+    if not orig_files:
+        raise ValueError(f"No MACv2 natural climatology source files found: {orig_pattern}")
+
+    workdir = tempfile.TemporaryDirectory(dir=MACV2SP_DATADIR, prefix="workdir")
+    dest_files = []
+    for orig in orig_files:
+        print(f"Interpolating {os.path.basename(orig)} to station locations.")
+        orig_fixed = os.path.join(workdir.name,
+                                  os.path.basename(orig).replace("gt_n", "gt_n_fixed"))
+        orig_ds = xr.open_dataset(orig)
+        orig_ds.assign_coords(lon=np.mod(orig_ds.lon, 360)).to_netcdf(orig_fixed)
+        dest = os.path.join(workdir.name,
+                            os.path.basename(orig).replace("gt_n", "gt_n_points"))
+        cdo_interpolate_2d(griddes_file, orig_fixed, dest)
+        dest_files.append(dest)
+
+    open_macv2nat_output(dest_files).to_netcdf(macv2nat_points_fpath)
+    for f in dest_files:
+        os.remove(f)

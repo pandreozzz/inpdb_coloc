@@ -90,6 +90,7 @@ def build_aeronet_collection(
     cams_free_aeronet_path : Union[None, str, List[str]] = None,
     cams_clim_aeronet_path : Optional[str] = None,
     macv2sp_aeronet_path : Optional[str] = None,
+    macv2nat_aeronet_path : Optional[str] = None,
     merra2_aeronet_path : Optional[str] = None,
     lon_to_degeast : Optional[bool] = None,
     t_approx_h : Optional[bool] = None,
@@ -127,7 +128,7 @@ def build_aeronet_collection(
     import os
     from glob import glob
     from src.config import get_aeronet_dir_path, get_cams_free_aeronet_path, \
-        get_cams_clim_aeronet_path, get_macv2sp_aeronet_path, CONFIGDICT
+        get_cams_clim_aeronet_path, get_macv2sp_aeronet_path, get_macv2nat_aeronet_path, CONFIGDICT
 
     if CONFIGDICT == {}:
         from src.config import digest_config
@@ -141,15 +142,17 @@ def build_aeronet_collection(
 
     if cams_clim_aeronet_path is None:
         cams_clim_aeronet_path = get_cams_clim_aeronet_path(data_product="AOD")
-    # Preliminary sanity checks
-    elif not os.path.exists(cams_clim_aeronet_path):
-        raise ValueError(f"Provided path {cams_clim_aeronet_path} not found.")
 
     if macv2sp_aeronet_path is None:
         macv2sp_aeronet_path = get_macv2sp_aeronet_path()
     # Preliminary sanity checks
     elif macv2sp_aeronet_path != "" and not os.path.exists(macv2sp_aeronet_path):
         raise ValueError(f"Provided path {macv2sp_aeronet_path} not found.")
+
+    if macv2nat_aeronet_path is None:
+        macv2nat_aeronet_path = get_macv2nat_aeronet_path()
+    elif macv2nat_aeronet_path and not os.path.exists(macv2nat_aeronet_path):
+        raise ValueError(f"macv2nat_aeronet_path not found: {macv2nat_aeronet_path}")
 
     if merra2_aeronet_path is None:
         merra2_aeronet_path = get_merra2_aeronet_path()
@@ -192,6 +195,15 @@ def build_aeronet_collection(
     else:
         this_macv2sp_aeronet_path = ""
 
+    if macv2nat_aeronet_path != "":
+        if not os.path.exists(macv2nat_aeronet_path):
+            print(f"MACv2-SP natural not found at {macv2nat_aeronet_path}. Will generate.")
+            this_macv2nat_aeronet_path = None
+        else:
+            this_macv2nat_aeronet_path = macv2nat_aeronet_path
+    else:
+        this_macv2nat_aeronet_path = ""
+
     if merra2_aeronet_path != "":
         if not os.path.exists(merra2_aeronet_path):
             print(f"MERRA2 data interpolated to Aeronet sites not found at {merra2_aeronet_path}. Will be generated")
@@ -209,6 +221,7 @@ def build_aeronet_collection(
         cams_clim_path=this_cams_clim_aeronet_path,
         cams_free_path=cams_free_aeronet_path,
         macv2sp_path=this_macv2sp_aeronet_path,
+        macv2nat_path=this_macv2nat_aeronet_path,
         merra2_path=this_merra2_aeronet_path,
         timerange=timerange
     )
@@ -224,6 +237,13 @@ def build_aeronet_collection(
                                 obs_coll = aeronet_coll,
                                 overwrite = overwrite)
         aeronet_coll.load_macv2sp(get_macv2sp_aeronet_path())
+
+    if this_macv2nat_aeronet_path is None:
+        from src.utils.macv2sp import gen_macv2nat_pointinterp
+        gen_macv2nat_pointinterp(macv2nat_points_fpath=get_macv2nat_aeronet_path(),
+                                 obs_coll=aeronet_coll,
+                                 overwrite=overwrite)
+        aeronet_coll.load_macv2nat(get_macv2nat_aeronet_path())
 
     if this_merra2_aeronet_path is None:
         from src.utils.merra2 import gen_merra2_pointinterp
