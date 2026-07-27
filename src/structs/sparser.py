@@ -24,8 +24,10 @@ class SparseIndexedCollection:
 
         self.update_attrs(self.sparse_attrs+self.derived_attrs)
 
-    def add_sparse_attrs(self, sparse_attrs : List[Tuple[str, type]] = []):
+    def add_sparse_attrs(self, sparse_attrs : Optional[List[Tuple[str, type]]] = None):
         """Add new sparse attributes to the collection"""
+        if sparse_attrs is None:
+            return
         for attr, dtype in sparse_attrs:
             if attr not in [a for a, _ in self.sparse_attrs]:
                 self.sparse_attrs.append((attr, dtype))
@@ -180,9 +182,11 @@ class INPIndexedCollection(SparseIndexedCollection):
 class AeronetIndexedCollection(SparseIndexedCollection):
     """Sparse Aeronet obs"""
     def __init__(self,
-                 additional_sparse_attrs : List[Tuple[str, type]] = [
-                     ("station", str)
-                 ]):
+                 additional_sparse_attrs : Optional[List[Tuple[str, type]]] = None):
+        if additional_sparse_attrs is None:
+            additional_sparse_attrs = [
+                ("station", str)
+            ]
         super().__init__()
         self.additional_sparse_attrs = additional_sparse_attrs
         self.add_sparse_attrs(self.additional_sparse_attrs)

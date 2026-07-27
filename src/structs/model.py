@@ -16,7 +16,7 @@ class ModelHandler:
 
     def get_subset(self,
                    coord_values : Optional[np.ndarray] = None,
-                   coords_to_assign : Dict[str, List] = {},
+                   coords_to_assign : Optional[Dict[str, List]] = None,
                    atol=1.e-4, sort_time : bool = True
                    ) -> Self:
         """Get a subset of the data based on coordinate values. This is used for colocation.
@@ -25,6 +25,9 @@ class ModelHandler:
         as stored in the uniques for the INP sparse structure
         atol is the absolute tolerance for searching the coord_values
         """
+        if coords_to_assign is None:
+            coords_to_assign = {}
+
         if self.data is None:
             return self
         subset = self.__class__(

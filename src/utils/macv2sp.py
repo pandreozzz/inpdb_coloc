@@ -118,15 +118,17 @@ def open_macv2sp_output(output_path : Union[str, List[str]]) -> xr.Dataset:
         print("Opening files as netCDF")
         opends_kwargs["engine"] = "netcdf4"
 
-
+    ds_list = []
+    for f in all_files:
+        m = re.search(f"_(\d+)nm(?:_zarr|\.nc)$", f)
+        if m is None:
+            raise ValueError(f"Could not parse wavelength in filename: {f}")
+        wl = int(m.group(1))
+        ds_list.append(
+            _process_times(xr.open_dataset(f, **opends_kwargs)).expand_dims(wavelength=[wl])
+        )
     # Concat by wavelength
-    this_data = xr.concat(
-        [_process_times(xr.open_dataset(f, **opends_kwargs)).expand_dims(
-            wavelength=[int(re.search(r".*_(\d+)nm['_zarr','.nc']{1}", f).group(1))] # type: ignore
-            )
-            for f in all_files],
-        dim="wavelength"
-    )
+    this_data = xr.concat(ds_list, dim="wavelength")
 
     wl_attrs = {"units" : "nm"}
     for k, v in wl_attrs.items():

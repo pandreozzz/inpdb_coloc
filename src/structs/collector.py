@@ -837,7 +837,9 @@ class StationsCollection:
         self.cams_clim = CamsClimHandler(vert_dim="lev")
         self.cams_free = CamsOutputHandler(vert_dim="plev")
         self.era5 = ERA5DataHandler(vert_dim="plev")
+        self.macv2sp = MacV2SPHandler(vert_dim=None)
         self.macv2nat  : MacV2NatHandler = MacV2NatHandler(vert_dim=None)
+        self.merra2 = MERRA2Handler(vert_dim=None)
 
     def _swap_model_dim_to_station_name(self, model_handler: ModelHandler) -> None:
         """Promote the station_name coordinate to the active horizontal dimension."""
@@ -1080,7 +1082,7 @@ class StationsCollection:
                    ) -> xr.Dataset:
         """Get MERRA2 data at requested times."""
 
-        assert self.get_merra2 is not None, "MERRA2 data handler is not loaded yet!"
+        assert self.merra2.data is not None, "MERRA2 data handler is not loaded yet!"
 
         if isinstance(time, np.datetime64):
             time = [time]
@@ -1107,7 +1109,7 @@ class StationsCollection:
                     ) -> xr.Dataset:
         """Get MACv2-SP data at requested times."""
 
-        assert self.get_macv2sp is not None, "MACv2-SP data handler is not loaded yet!"
+        assert self.macv2sp.data is not None, "MACv2-SP data handler is not loaded yet!"
 
         if isinstance(time, np.datetime64):
             time = [time]
@@ -1383,7 +1385,7 @@ class AeronetCollection(StationsCollection):
             df_merged = pd.concat(all_aeronet_dfs, ignore_index=True)
             date = pd.Timestamp.now().strftime("%Y%m%d")
             synth_file = synth_file_name_like.replace("*", date)
-            df_merged.to_parquet(os.path.join(aeronet_dir_path, synth_file))
+            df_merged.to_parquet(synth_file)
             del df_merged
 
         else:
@@ -1542,8 +1544,8 @@ class AeronetCollection(StationsCollection):
         ae_cols = [c for c in df.columns if c in aewl_tags]
 
         extra_cols: List[str] = []
-        if include_precipitable_water and "Precipitable_water(cm)" in df.columns:
-            extra_cols.append("Precipitable_water(cm)")
+        if include_precipitable_water and "Precipitable_Water(cm)" in df.columns:
+            extra_cols.append("Precipitable_Water(cm)")
 
         value_cols = aod_cols + ae_cols + extra_cols
         pivot_cols = ["time", "station_name"] + value_cols
@@ -1715,6 +1717,10 @@ class AeronetCollection(StationsCollection):
             if not skip_ae:
                 print(f"No AE calculation yet implemented")
                 pass
+
+            # TODO: if AERONET data are monthly
+            # do monthly means of all CAMS available timesteps
+            print("Warning: CAMS free AOD not yet averaged to monthly means, returning instantaneous values")
             return aod_ds.sel(wavelength=list(wavelengths_nm))
 
 

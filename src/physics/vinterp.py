@@ -14,7 +14,13 @@ import xarray as xr
 # Fortran library interface (from fvertintp_iface.py)
 # -----------------------------------------------------------------------------
 _F_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "f_src", "fvertintp.so")
-f_lib = ct.CDLL(_F_LIB_PATH)
+try:
+    f_lib = ct.CDLL(_F_LIB_PATH)
+except OSError as exc:
+    raise OSError(
+        f"Could not load Fortran library {os.path.basename(_F_LIB_PATH)}. "
+        + "Make sure it is compiled and available in the same directory as this file. (Maybe need to execute Makefile?)"
+    ) from exc
 
 c_real = ct.c_double
 c_real_ptr = np.ctypeslib.ndpointer(c_real)
