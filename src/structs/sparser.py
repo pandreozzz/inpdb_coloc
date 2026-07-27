@@ -1,44 +1,63 @@
 from __future__ import annotations
 
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Tuple
 import pandas as pd
 import numpy as np
 import xarray as xr
 
 from .cores import SparseIndex
 
-class INPIndex:
+
+class SparseIndexedCollection:
     """Helper class to store index arrays for all attributes"""
     def __init__(self):
-        self.sparse_attrs = ["time", "lon", "lat", "alt", "T", "RHw", "RHi"]
-        self.time = SparseIndex(dtype="datetime64[ns]")
-        self.lon = SparseIndex(dtype=np.float32)
-        self.lat = SparseIndex(dtype=np.float32)
-        self.alt = SparseIndex(dtype=np.float32)
-        self.T = SparseIndex(dtype=np.float32)
-        self.RHw = SparseIndex(dtype=np.float32)
-        self.RHi = SparseIndex(dtype=np.float32)
+        self.sparse_attrs = [
+            ("time", "datetime64[ns]"),
+            ("lon", np.float32),
+            ("lat", np.float32),
+            ("alt", np.float32),
+        ]
 
-        self.derived_attrs = ["coord"]
-        self.coord = SparseIndex(dtype=np.float32)
-        #self.instrument = SparseIndex()
-        #self.instrument_type = SparseIndex()
-    
-    def copy_from(self, other : INPIndex,
+        self.derived_attrs = [
+            ("coord", np.float32)
+        ]
+
+        self.update_attrs(self.sparse_attrs+self.derived_attrs)
+
+    def add_sparse_attrs(self, sparse_attrs : Optional[List[Tuple[str, type]]] = None):
+        """Add new sparse attributes to the collection"""
+        if sparse_attrs is None:
+            return
+        for attr, dtype in sparse_attrs:
+            if attr not in [a for a, _ in self.sparse_attrs]:
+                self.sparse_attrs.append((attr, dtype))
+            else:
+                raise ValueError(f"Attribute '{attr}' already exists in sparse_attrs")
+
+        self.update_attrs(self.sparse_attrs)
+
+    def update_attrs(self, attrs_defs : List[Tuple[str, type]]):
+        """Update the attributes of the SparseCollection based on sparse_attrs"""
+        for attr, dtype in attrs_defs:
+            if not hasattr(self, attr):
+                setattr(self, attr, SparseIndex(dtype=dtype))
+
+
+    def copy_from(self, other : SparseIndexedCollection,
                   loc : Optional[Union[List[int], int]] = None,
                   refactorise : bool = False
-                  ):
-        """Copy index values from another INPIndex,
+                  ) -> None:
+        """Copy index values from another SparseCollection,
         use loc to select a subset of point data
         refactorise to rebuild the index and keep only values present in the subset
         """
 
         if loc is not None and isinstance(loc, int):
             loc = [loc]
-        for attr in self.sparse_attrs:
+        for attr, _ in self.sparse_attrs:
             other_sparse = getattr(other, attr)
             this_sparse = getattr(self, attr)
-            
+
             if refactorise:
                 new_index, new_uniques = pd.factorize(
                     other_sparse.getv(loc=loc), sort=False,
@@ -51,11 +70,11 @@ class INPIndex:
                 else:
                     this_sparse.index = other_sparse.index.copy()
                 this_sparse.uniques = other_sparse.uniques.copy()
-    
+
         # Derived attrs
         self.set_coords()
-    
-    def store(self, attr : str, values : List[float]):
+
+    def store(self, attr : str, values : List[float]) -> None:
         """Store values for and build index"""
 
         existing = getattr(self, attr).uniques
@@ -74,7 +93,7 @@ class INPIndex:
                 np.append(existing, these_uniques.astype(existing.dtype)))
 
 
-    def set_coords(self):
+    def set_coords(self) -> None:
         """Sets unique coordinate indices
         based on current coordinate values
         """
@@ -87,6 +106,7 @@ class INPIndex:
                             )])
         uniques, coords_index = np.unique(all_coords, axis=0, return_inverse=True)
 
+        self.coord = SparseIndex(dtype=np.float32)
         self.coord.uniques = uniques
         self.coord.index = coords_index.tolist()
         self.coord.info["dims"] = "(point_idx, lon, lat)"
@@ -108,9 +128,9 @@ class INPIndex:
         if self.coord.is_empty():
             try:
                 self.set_coords()
-            except Exception as e:
-                raise ValueError("Could not get grid info.") from e
-        
+            except Exception as exc:
+                raise ValueError("Could not get grid info.") from exc
+
         lon_metadata = {
             'long_name': 'Longitude',
             'units': 'degrees_east'
@@ -137,7 +157,7 @@ class INPIndex:
         ds = xr.Dataset(coords=coords,\
                         data_vars=data_vars)
         return ds
-    
+
     def getv(self, attr : str, loc : Optional[Union[List[int], int]] = None):
         """Get unwrapped values for a given attribute and location(s)
         """
@@ -146,3 +166,27 @@ class INPIndex:
         sparse_entry = getattr(self, attr)
 
         return sparse_entry.getv(loc=loc)
+
+
+class INPIndexedCollection(SparseIndexedCollection):
+    """Sparse INP obs"""
+    def __init__(self):
+        super().__init__()
+        self.additional_sparse_attrs = [
+            ("T", np.float32),
+            ("RHw", np.float32),
+            ("RHi", np.float32)
+        ]
+        self.add_sparse_attrs(self.additional_sparse_attrs)
+
+class AeronetIndexedCollection(SparseIndexedCollection):
+    """Sparse Aeronet obs"""
+    def __init__(self,
+                 additional_sparse_attrs : Optional[List[Tuple[str, type]]] = None):
+        if additional_sparse_attrs is None:
+            additional_sparse_attrs = [
+                ("station", str)
+            ]
+        super().__init__()
+        self.additional_sparse_attrs = additional_sparse_attrs
+        self.add_sparse_attrs(self.additional_sparse_attrs)

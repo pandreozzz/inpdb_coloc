@@ -5,12 +5,14 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 
+from collections.abc import Callable
+
 from .constants import Constants
 
 class INPParametrization:
         """Class to handle INP parametrizations. It should be able to take as input the co-located data and return INP concentrations per liter according to the parametrization."""
-        def initialise(self, 
-                       site_density_function: Optional[callable] = None, 
+        def initialise(self,
+                       site_density_function: Optional[Callable] = None,
                        aerosol_variables: Optional[List[str]] = None,
                        aerosol_fraction: Optional[float] = 1.0,
                        T_min: Optional[float] = None,
@@ -26,11 +28,11 @@ class INPParametrization:
 
         def compute_inp_concentration(self, temperature_data, air_density_data, cams_data, aerosol_spec, clip_to_T_range='clip_low_T'):
             """
-            Compute INP concentration from the input data using the parametrization. 
+            Compute INP concentration from the input data using the parametrization.
             By default the temperature data is clipped for temperatures below the range of validity of the parametrization.
             """
-            
-            inp_num_concs = {} 
+
+            inp_num_concs = {}
             for i, var in enumerate(self.aerovars):
                 if var not in cams_data:
                     raise ValueError(f"Aerosol variable {var} not found in CAMS data.")
@@ -46,7 +48,7 @@ class INPParametrization:
                 inp_num_concs[var] = inp_num_conc
 
             return sum(inp_num_concs.values()) # Sum over the different aerosol bins to get total INP concentration
-        
+
 
 class INPParametrizationCatalog:
     """Class to store a catalog of INP parametrizations."""
@@ -71,7 +73,7 @@ class INPParametrizationCatalog:
         param = INPParametrization()
         param.initialise(
              site_density_function=ns_kf, # kfeldspar
-             aerosol_variables=aerospec.dustvars, 
+             aerosol_variables=aerospec.dustvars,
              aerosol_fraction=0.05, # Assume 5% of dust is feldspar, which is the active INP species parametrised in Harrison et al. 2019
              T_min=-37.5 + 273.15, # Minimum temperature for the parametrization in Kelvin
              T_max=-3.5 + 273.15, # Maximum temperature for the parametrization in Kelvin
@@ -79,7 +81,7 @@ class INPParametrizationCatalog:
              )
         self.parametrizations[name] = param
 
-        # Atkinson2013 parametrization for k-feldspar in dust. They report, feldspar mass content in natural soils typically varies between 1% and 25% 
+        # Atkinson2013 parametrization for k-feldspar in dust. They report, feldspar mass content in natural soils typically varies between 1% and 25%
         # https://doi.org/10.1038/nature12278
         name = "Atkinson2013"
         def ns_kf(t):
@@ -88,7 +90,7 @@ class INPParametrizationCatalog:
         param = INPParametrization()
         param.initialise(
              site_density_function=ns_kf, # kfeldspar
-             aerosol_variables=aerospec.dustvars, 
+             aerosol_variables=aerospec.dustvars,
              aerosol_fraction=0.05, # Assume 5% of dust is feldspar (k-feldspar fraction); see Atkinson et al. 2013 for context
              T_max=268, # Maximum temperature for the parametrization in Kelvin
              doi="https://doi.org/10.1038/nature12278",
@@ -104,7 +106,7 @@ class INPParametrizationCatalog:
         param = INPParametrization()
         param.initialise(
              site_density_function=ns_soil, # untreated soil dust
-             aerosol_variables=aerospec.dustvars, 
+             aerosol_variables=aerospec.dustvars,
              T_min=246, # Minimum temperature for the parametrization in Kelvin
              T_max=267, # Maximum temperature for the parametrization in Kelvin
              doi="https://doi.org/10.5194/acp-14-1853-2014",
@@ -118,14 +120,14 @@ class INPParametrizationCatalog:
         def ns_mom(t):
             a = -0.545
             b = 1.0125
-            
+
             rs = a*(t - 273.15)+b
-            
+
             return np.exp(rs)*1.e-4
         param = INPParametrization()
         param.initialise(
              site_density_function=ns_mom, # marine organic
-             aerosol_variables=aerospec.marinvars, 
+             aerosol_variables=aerospec.marinvars,
              T_min=-28 + 273.15, # Minimum temperature for the parametrization in Kelvin – estimated from the data points shown in Figure 8 of McCluskey et al. 2018
              T_max=-10 + 273.15, # Maximum temperature for the parametrization in Kelvin – estimated from the data points shown in Figure 8 of McCluskey et al. 2018
              doi="http://dx.doi.org/10.1029/2017JD028033"

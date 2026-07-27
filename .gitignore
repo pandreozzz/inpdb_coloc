@@ -3,4 +3,6 @@
 .ipynb_checkpoints
 .local_venv
 *.pyc
+
+*.mod
 __pycache__/

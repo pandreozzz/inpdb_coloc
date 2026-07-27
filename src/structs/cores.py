@@ -19,10 +19,10 @@ class SparseIndex:
 
     def is_empty(self):
         return len(self.uniques) == 0
-    
+
     def getv(self, loc : Union[None, int, List[int], np.ndarray] = None) -> np.ndarray:
         """Get the unique values corresponding point location"""
-        
+
         if isinstance(loc, int):
             loc = [loc]
 
@@ -37,8 +37,9 @@ class SparseIndex:
         return self.uniques[indexer]
 
 class DenseValue:
-    def __init__(self):
-        self.values = np.array([])
+    def __init__(self, dtype = np.float64):
+        self.dtype = np.dtype(dtype)
+        self.values = np.array([], dtype=self.dtype)
 
     def copy_from(self, other : DenseValue,
                   loc : Optional[Union[List[int], int]] = None):
@@ -46,6 +47,6 @@ class DenseValue:
         if loc is not None and isinstance(loc, int):
             loc = [loc]
         if loc is not None:
-            self.values = np.asarray(other.values)[loc]
+            self.values = np.asarray(other.values, dtype=self.dtype)[loc]
         else:
             self.values = other.values.copy()

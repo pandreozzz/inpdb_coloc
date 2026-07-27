@@ -7,3 +7,4 @@ netCDF4
 matplotlib
 cartopy
 scipy
+tqdm

@@ -2,9 +2,10 @@
 from typing import Union
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
-from src.structs.collector import INPCollection
+from src.structs.collector import ObsCollection, StationsCollection
 
 RENAMEDIC = {
     **{f"aermr{i:02d}" : f"Sea_Salt_bin{i}"
@@ -17,9 +18,9 @@ RENAMEDIC = {
 # Monthly climatology interpolation
 # -----------------------------------------------------------------------------
 def interpolate_monthly_clim(
-    dset: Union[xr.Dataset, xr.DataArray],
+    dset: xr.Dataset,
     dates: xr.DataArray,
-) -> Union[xr.Dataset, xr.DataArray]:
+) -> xr.Dataset:
     """Linearly interpolate a monthly climatology to arbitrary `dates`.
 
     The input `dset` **must** have a `month` coordinate/dimension.
@@ -27,7 +28,7 @@ def interpolate_monthly_clim(
     along the time dimension. If those coordinates are also a dimension in dset, then these are considered
     aligned to the time interpolation and the result will be contracted along those dimensions as well.
 
-    For example, if dset has dimensions (month, lat) and dates has coordinates (time(time), lat(time)), 
+    For example, if dset has dimensions (month, lat) and dates has coordinates (time(time), lat(time)),
     then the output will be the interpolation along time of the corresponding lat,
     so will have only the time dimension.
 
@@ -65,7 +66,7 @@ def interpolate_monthly_clim(
            for cname, coord in dates.coords.items()
            if cname != "month"},
     }
-    
+
     intmonths_bot = xr.DataArray(
         data=prev_month.astype("datetime64[ns]"),
         dims=["time"],
@@ -81,7 +82,7 @@ def interpolate_monthly_clim(
                       for cname, coord in dates.coords.items()
                       if cname in dset.dims}
 
-    # Take 
+    # Take
     if "epoch" in dset.coords:
         epochs = dset.epoch.values
         max_epoch, min_epoch = epochs.max(), epochs.min()
@@ -104,7 +105,7 @@ def interpolate_monthly_clim(
         timeweight_e = []
         epoch_lower = []
         epoch_upper = []
-    
+
     lower = dset.sel(month=intmonths_bot, **add_sel_kwargs).drop_vars("month")
     upper = dset.sel(month=intmonths_top, **add_sel_kwargs).drop_vars("month")
 
@@ -125,77 +126,102 @@ def interpolate_monthly_clim(
     return dset_intp
 
 
-def gen_cams_pointinterp(inp_coll : INPCollection, overwrite : bool = False) -> None:
+def gen_cams_pointinterp(obs_coll : Union[ObsCollection, StationsCollection],
+                         overwrite : bool = False) -> None:
     """Generate the point-interpolated CAMS climatology"""
     import os
-    from src.config import get_cams_clim_path, get_cams_clim_sites_path, get_inpdb_csv_path, CONFIGDICT
 
-    cams_clim_sites_fpath = get_cams_clim_sites_path()
-    
-    if os.path.exists(cams_clim_sites_fpath):
-        if overwrite:
-            print(f"CAMS climatology interpolated to INPDB sites already exists at {os.path.basename(cams_clim_sites_fpath)}. Nothing to do here.")
+    from .cdoers import cdo_interpolate_2d
+
+    cams_clim_points_fpath = obs_coll.cams_clim_points_file
+
+    if os.path.exists(cams_clim_points_fpath):
+        if not overwrite:
+            print(f"CAMS climatology interpolated to observation sites already exists at {os.path.basename(cams_clim_points_fpath)}. Nothing to do here.")
             return
-        print(f"Overwriting existing file at {cams_clim_sites_fpath}.")
-        os.remove(cams_clim_sites_fpath)
+        print(f"Overwriting existing file at {cams_clim_points_fpath}.")
+        os.remove(cams_clim_points_fpath)
 
 
-    griddes_file = get_inpdb_csv_path().replace(".csv", "_griddes.txt")
-
-    inp_coll_locs = inp_coll.sparse.get_grid_xarray()
+    griddes_file = obs_coll.griddes_file
 
     # Griddes file?
     if overwrite and os.path.exists(griddes_file):
-            print(f"Overwriting existing griddes file at {os.path.basename(griddes_file)}.")
-            os.remove(griddes_file)
+        print(f"Overwriting existing griddes file at {os.path.basename(griddes_file)}.")
+        os.remove(griddes_file)
 
     if not os.path.exists(griddes_file):
         print(f"Creating griddes file at {griddes_file}")
         from src.utils.cdoers import gen_griddes_unstructured
-        griddes_str = gen_griddes_unstructured(inp_coll_locs.lon.values, inp_coll_locs.lat.values)
+        obs_coll_locs = obs_coll.get_grid_xarray()
+        griddes_str = gen_griddes_unstructured(obs_coll_locs.lon.values, obs_coll_locs.lat.values)
         with open(griddes_file, 'w') as f:
             f.write(griddes_str)
     else:
         print(f"Griddes file {os.path.basename(griddes_file)} exists.")
 
-    cams_clim_fpath = get_cams_clim_path()
-    cams_clim_restricted_fpath = cams_clim_fpath.replace(".nc", "_restricted.nc")
+    cams_clim_fpath = obs_coll.cams_clim_file
 
-
-    # Interpolation with cdo
-    import shutil
-    import subprocess
-
-    #Check that cdo is available
-    if shutil.which("cdo") is None:
-        raise RuntimeError("CDO command not found. CDO must be installed and available in PATH.")
-    else:
-        print("CDO command found.")
-
+    if not os.path.exists(cams_clim_fpath):
+        raise FileNotFoundError(f"CAMS climatology file not found at expected location {cams_clim_fpath}.")
     ds_orig = xr.open_dataset(cams_clim_fpath)
     #stackdims = [d for d in ["epoch", "month"] if d in ds_orig.dims]
     #ds_orig = ds_orig.stack(time=stackdims).drop_vars(stackdims).transpose("time", ...).to_netcdf(cams_clim_restricted_fpath)
 
-    # Hardcoded for now. If species with anthropogenic signal are needed, 
+    # Hardcoded for now. If species with anthropogenic signal are needed,
     # Then this should handle also the epoch dimension
-    spec_sel = [f"{sp}_bin{i}" for sp in ["Mineral_Dust", "Sea_Salt"] for i in [1,2,3]]
-    ds_orig[spec_sel].rename(month="time").drop_vars("time").to_netcdf(cams_clim_restricted_fpath)
+    from src.structs.collector import INPCollection
+    if obs_coll.__class__ == INPCollection:
+        spec_sel_sites = [f"{sp}_bin{i}" for sp in ["Mineral_Dust", "Sea_Salt"] for i in [1,2,3]] +\
+              ["pressure"]
+        ds_orig = ds_orig[spec_sel_sites]
 
-    cmd_cdo_regrid = ["cdo", f"-remapbil,{griddes_file}", cams_clim_restricted_fpath, cams_clim_sites_fpath]
+    # All variables with the "epoch" dimension
+    var_epoch = [v for v in ds_orig.data_vars if "epoch" in ds_orig[v].dims]
+    var_nonepoch = [v for v in ds_orig.data_vars if "epoch" not in ds_orig[v].dims]
 
-    print(f"Running CDO command: {' '.join(cmd_cdo_regrid)}")
-    subprocess.run(cmd_cdo_regrid, check=True)
 
-    print(f"Removing CAMS {os.path.basename(cams_clim_restricted_fpath)}")
-    os.remove(cams_clim_restricted_fpath)
+    cams_clim_restricted_points = []
+    for i,var_group in enumerate([var_epoch, var_nonepoch]):
+        if len(var_group) == 0:
+            continue
 
-    # Reassign the multiindex and unstack
-    with xr.open_dataset(cams_clim_sites_fpath) as ds_sites:
-        cams_clim_sites = ds_sites.rename(time="month").assign_coords(month=ds_orig["month"]).load()
+        cams_clim_restricted_fpath = cams_clim_fpath.replace(".nc", f"_restricted{i}.nc")
+        # Save to temporary workdir subdirectory
+        import tempfile
+        workdir = tempfile.TemporaryDirectory(prefix="workdir", dir=os.path.dirname(cams_clim_fpath))
+        cams_clim_restricted_fpath = os.path.join(workdir.name, os.path.basename(cams_clim_restricted_fpath))
+        cams_clim_restricted_points_fpath = cams_clim_restricted_fpath.replace(".nc", "_points.nc")
+        this_ds_group = ds_orig[var_group]
+        has_epoch = "epoch" in this_ds_group.dims
 
-    ds_orig.close()
-    cams_clim_sites.to_netcdf(cams_clim_sites_fpath)
+        if "month" in this_ds_group.dims:
+            if has_epoch:
+                this_ds_group = this_ds_group.stack(time=["epoch", "month"])
+                this_ds_group.reset_index("time").drop_vars(["epoch", "month"]).assign_coords(
+                    time=xr.DataArray(np.arange(len(this_ds_group.time), dtype="float64"), dims="time", attrs={"units": "months since 1900-01-01"})
+                ).transpose("time", ...).to_netcdf(cams_clim_restricted_fpath)
+            else:
+                this_ds_group.rename({"month": "time"}).to_netcdf(cams_clim_restricted_fpath)
+        else:
+            raise ValueError("CAMS climatology data must have a 'month' dimension for interpolation.")
 
-    
+        cdo_interpolate_2d(griddes_file, cams_clim_restricted_fpath, cams_clim_restricted_points_fpath)
 
+        with xr.open_dataset(cams_clim_restricted_points_fpath, decode_times=False) as ds_sites:
+            if has_epoch and "time" in ds_sites.dims:
+                mindex = pd.MultiIndex.from_tuples(this_ds_group.indexes["time"], names=["epoch", "month"])
+                mindex_coords = xr.Coordinates.from_pandas_multiindex(mindex, "time")
+                ds_sites = ds_sites.assign_coords(mindex_coords).unstack("time")
+            elif "time" in ds_sites.dims:
+                ds_sites = ds_sites.rename({"time": "month"})
+                ds_sites = ds_sites.assign_coords(month=ds_orig["month"])
+            cams_clim_restricted_points.append(ds_sites.load())
+            os.remove(cams_clim_restricted_points_fpath)
+
+    if len(cams_clim_restricted_points) == 0:
+        raise ValueError(f"No interpolated cams clim datasets. Something went wrong with the interpolation.")
+
+    xr.merge(cams_clim_restricted_points).to_netcdf(cams_clim_points_fpath)
+    print(f"Created CAMS climatology interpolated to observation sites at {cams_clim_points_fpath}")
 
